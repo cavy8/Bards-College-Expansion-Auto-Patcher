@@ -9,4 +9,10 @@
     <PackageReference Include="Mutagen.Bethesda.Skyrim" Version="0.53.1" />
     <PackageReference Include="Mutagen.Bethesda.Synthesis" Version="0.35.5" />
   </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="..\BardsCollegeMatchingRefs.csv" Link="BardsCollegeMatchingRefs.csv">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
 </Project>

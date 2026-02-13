@@ -8,11 +8,11 @@
 - [x] Get user approval on plan
 
 ## Phase 1: Project Setup & CSV Loading
-- [ ] Update csproj with required packages
-- [ ] Create Settings.cs with blacklist/debug options
-- [ ] Create RefMapping.cs to load CSV
-- [ ] Create Program.cs scaffolding with BCE mod detection
-- [ ] Verify build
+- [x] Update csproj with required packages
+- [x] Create Settings.cs with blacklist/debug options
+- [x] Create RefMapping.cs to load CSV
+- [x] Create Program.cs scaffolding with BCE mod detection
+- [x] Verify build
 
 ## Phase 2: Move New References
 - [ ] Identify refs in vanilla bards college cell NOT from original ESMs and NOT in CSV
