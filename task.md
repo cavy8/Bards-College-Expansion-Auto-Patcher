@@ -20,9 +20,9 @@
 - [ ] Verify with test load order
 
 ## Phase 3: Sync Changes to Matching References
-- [ ] Compare winning overrides of Cell1 refs against their original ESM definitions
-- [ ] Detect changes to base record, placement, enable parent, flags, etc.
-- [ ] Apply same changes to corresponding Cell2 (BCE) refs
+- [x] Compare winning overrides of Cell1 refs against their original ESM definitions
+- [x] Detect changes to base record, placement, enable parent, flags, etc.
+- [x] Apply same changes to corresponding Cell2 (BCE) refs
 - [ ] Verify
 
 ## Phase 4: Swap Cell/Ref References in Other Plugins

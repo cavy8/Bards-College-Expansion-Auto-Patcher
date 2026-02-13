@@ -1,5 +1,7 @@
+using System.Collections;
 using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
+using Mutagen.Bethesda.Plugins.Cache;
 using Mutagen.Bethesda.Plugins.Records;
 using Mutagen.Bethesda.Skyrim;
 using Mutagen.Bethesda.Synthesis;
@@ -75,6 +77,7 @@ public static class Program
         }
 
         MoveNewReferencesToBceCell(state, settings, refMapping);
+        SyncMappedReferencesToBce(state, settings, refMapping);
     }
 
     private static void MoveNewReferencesToBceCell(
@@ -230,5 +233,222 @@ public static class Program
         }
 
         return removed;
+    }
+
+    private static void SyncMappedReferencesToBce(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        RefMapping refMapping)
+    {
+        var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
+        var loadOrderIndex = state.LoadOrder.ListedOrder
+            .Select((listing, index) => (listing.ModKey, index))
+            .ToDictionary(x => x.ModKey, x => x.index);
+
+        var evaluated = 0;
+        var changed = 0;
+
+        foreach (var pair in refMapping.Cell1ToCell2)
+        {
+            evaluated++;
+
+            var cell1Link = pair.Key.ToLink<IPlacedGetter>();
+            var allCell1Contexts = cell1Link
+                .ResolveAllSimpleContexts<IPlacedGetter>(state.LinkCache)
+                .Select(x => (Typed: x, Untyped: (IModContext)x))
+                .Where(x => x.Untyped.ModKey != state.PatchMod.ModKey)
+                .ToList();
+
+            if (allCell1Contexts.Count == 0)
+            {
+                continue;
+            }
+
+            var sourceContext = allCell1Contexts.FirstOrDefault(x => x.Untyped.ModKey == pair.Key.ModKey);
+            if (sourceContext.Typed is null)
+            {
+                continue;
+            }
+
+            var winningContext = allCell1Contexts
+                .Where(x => !blacklistedMods.Contains(x.Untyped.ModKey))
+                .OrderBy(x => loadOrderIndex.TryGetValue(x.Untyped.ModKey, out var index) ? index : int.MinValue)
+                .LastOrDefault();
+
+            if (winningContext.Typed is null)
+            {
+                continue;
+            }
+
+            var winningModKey = winningContext.Untyped.ModKey;
+
+            if (VanillaMasterModKeys.Contains(winningModKey) || winningModKey == BceModKey || blacklistedMods.Contains(winningModKey))
+            {
+                continue;
+            }
+
+            var originalRecord = sourceContext.Typed.Record;
+            var winningRecord = winningContext.Typed.Record;
+            if (winningRecord.Equals(originalRecord))
+            {
+                continue;
+            }
+
+            var cell2Link = pair.Value.ToLink<IPlacedGetter>();
+            if (!cell2Link.TryResolveContext<ISkyrimMod, ISkyrimModGetter, IPlaced, IPlacedGetter>(state.LinkCache, out var cell2Context))
+            {
+                continue;
+            }
+
+            var cell2Override = cell2Context.GetOrAddAsOverride(state.PatchMod);
+            if (!HaveMatchingPlacedKind(winningRecord, cell2Override))
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: type mismatch for {pair.Key} -> {pair.Value}, skipping.");
+                }
+
+                continue;
+            }
+
+            if (!ApplyChangedProperties(originalRecord, winningRecord, cell2Override))
+            {
+                continue;
+            }
+
+            changed++;
+
+            if (settings.Debug)
+            {
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: synced {pair.Key} -> {pair.Value} from {winningModKey.FileName}.");
+            }
+        }
+
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: evaluated {evaluated} mapped refs, synced {changed}.");
+    }
+
+    private static bool HaveMatchingPlacedKind(object left, object right)
+    {
+        return GetPlacedKind(left) == GetPlacedKind(right);
+    }
+
+    private static string GetPlacedKind(object value)
+    {
+        return value switch
+        {
+            IPlacedObjectGetter => "PlacedObject",
+            IPlacedNpcGetter => "PlacedNpc",
+            IAPlacedTrapGetter => "PlacedTrap",
+            _ => "Unknown"
+        };
+    }
+
+    private static bool ApplyChangedProperties(object originalRecord, object winningRecord, object targetRecord)
+    {
+        var changedAny = false;
+        var targetType = targetRecord.GetType();
+        var originalType = originalRecord.GetType();
+        var winningType = winningRecord.GetType();
+
+        foreach (var targetProperty in targetType.GetProperties())
+        {
+            if (!targetProperty.CanRead || !targetProperty.CanWrite)
+            {
+                continue;
+            }
+
+            if (targetProperty.GetIndexParameters().Length > 0)
+            {
+                continue;
+            }
+
+            if (targetProperty.Name is "FormKey" or "EditorID")
+            {
+                continue;
+            }
+
+            var originalProperty = originalType.GetProperty(targetProperty.Name);
+            var winningProperty = winningType.GetProperty(targetProperty.Name);
+            if (originalProperty is null || winningProperty is null || !originalProperty.CanRead || !winningProperty.CanRead)
+            {
+                continue;
+            }
+
+            var originalValue = originalProperty.GetValue(originalRecord);
+            var winningValue = winningProperty.GetValue(winningRecord);
+
+            if (ValuesEqual(originalValue, winningValue))
+            {
+                continue;
+            }
+
+            var assignmentValue = CloneForAssignment(winningValue);
+            if (assignmentValue is not null && !targetProperty.PropertyType.IsInstanceOfType(assignmentValue))
+            {
+                continue;
+            }
+
+            targetProperty.SetValue(targetRecord, assignmentValue);
+            changedAny = true;
+        }
+
+        return changedAny;
+    }
+
+    private static object? CloneForAssignment(object? value)
+    {
+        if (value is null)
+        {
+            return null;
+        }
+
+        var valueType = value.GetType();
+        if (valueType.IsValueType || value is string)
+        {
+            return value;
+        }
+
+        var deepCopyMethod = valueType.GetMethod("DeepCopy", Type.EmptyTypes);
+        if (deepCopyMethod is not null)
+        {
+            return deepCopyMethod.Invoke(value, null);
+        }
+
+        return value;
+    }
+
+    private static bool ValuesEqual(object? left, object? right)
+    {
+        if (ReferenceEquals(left, right))
+        {
+            return true;
+        }
+
+        if (left is null || right is null)
+        {
+            return false;
+        }
+
+        if (left is IEnumerable leftEnumerable && right is IEnumerable rightEnumerable && left is not string && right is not string)
+        {
+            var leftList = leftEnumerable.Cast<object?>().ToList();
+            var rightList = rightEnumerable.Cast<object?>().ToList();
+            if (leftList.Count != rightList.Count)
+            {
+                return false;
+            }
+
+            for (var i = 0; i < leftList.Count; i++)
+            {
+                if (!ValuesEqual(leftList[i], rightList[i]))
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        return left.Equals(right);
     }
 }
