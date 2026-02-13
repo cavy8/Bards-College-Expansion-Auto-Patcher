@@ -15,8 +15,8 @@
 - [x] Verify build
 
 ## Phase 2: Move New References
-- [ ] Identify refs in vanilla bards college cell NOT from original ESMs and NOT in CSV
-- [ ] Move (not copy) them into the BCE cell
+- [x] Identify refs in vanilla bards college cell NOT from original ESMs and NOT in CSV
+- [x] Move (not copy) them into the BCE cell
 - [ ] Verify with test load order
 
 ## Phase 3: Sync Changes to Matching References

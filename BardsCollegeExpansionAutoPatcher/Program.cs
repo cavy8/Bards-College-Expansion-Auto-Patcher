@@ -11,6 +11,14 @@ public static class Program
     private static readonly ModKey BceModKey = ModKey.FromNameAndExtension("kinggathcreations_bard.esm");
     private static readonly FormKey VanillaBardsCollegeCell = new(ModKey.FromNameAndExtension("Skyrim.esm"), 0x016A0C);
     private static readonly FormKey BceBardsCollegeCell = new(BceModKey, 0x01F0F8);
+    private static readonly HashSet<ModKey> VanillaMasterModKeys =
+    [
+        ModKey.FromNameAndExtension("Skyrim.esm"),
+        ModKey.FromNameAndExtension("Update.esm"),
+        ModKey.FromNameAndExtension("Dawnguard.esm"),
+        ModKey.FromNameAndExtension("HearthFires.esm"),
+        ModKey.FromNameAndExtension("Dragonborn.esm")
+    ];
 
     private static Lazy<Settings> _settings = null!;
 
@@ -65,5 +73,162 @@ public static class Program
         {
             Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Warning: Cell1 mapping contains non-00 load-order prefixes.");
         }
+
+        MoveNewReferencesToBceCell(state, settings, refMapping);
+    }
+
+    private static void MoveNewReferencesToBceCell(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        RefMapping refMapping)
+    {
+        var winningCells = state.LoadOrder.PriorityOrder
+            .Cell()
+            .WinningContextOverrides(state.LinkCache)
+            .ToDictionary(x => x.Record.FormKey, x => x);
+
+        if (!winningCells.TryGetValue(VanillaBardsCollegeCell, out var vanillaCellContext))
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Could not resolve vanilla cell {VanillaBardsCollegeCell}.");
+            return;
+        }
+
+        if (!winningCells.TryGetValue(BceBardsCollegeCell, out var bceCellContext))
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Could not resolve BCE cell {BceBardsCollegeCell}.");
+            return;
+        }
+
+        var vanillaCellGetter = vanillaCellContext.Record;
+        var bceCellGetter = bceCellContext.Record;
+
+        var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
+        var winningPersistentRefs = vanillaCellGetter.Persistent?.Select(x => x.FormKey).ToHashSet() ?? [];
+        var winningTemporaryRefs = vanillaCellGetter.Temporary?.Select(x => x.FormKey).ToHashSet() ?? [];
+        var allWinningRefs = (vanillaCellGetter.Persistent ?? [])
+            .Concat(vanillaCellGetter.Temporary ?? [])
+            .GroupBy(x => x.FormKey)
+            .Select(x => x.First());
+
+        var candidates = new List<IPlacedGetter>();
+        foreach (var placed in allWinningRefs)
+        {
+            if (placed is not IPlacedObjectGetter && placed is not IPlacedNpcGetter && placed is not IAPlacedTrapGetter)
+            {
+                continue;
+            }
+
+            var sourceMod = placed.FormKey.ModKey;
+            if (VanillaMasterModKeys.Contains(sourceMod))
+            {
+                continue;
+            }
+
+            if (sourceMod == BceModKey)
+            {
+                continue;
+            }
+
+            if (blacklistedMods.Contains(sourceMod))
+            {
+                continue;
+            }
+
+            if (refMapping.AllCell1Refs.Contains(placed.FormKey))
+            {
+                continue;
+            }
+
+            candidates.Add(placed);
+        }
+
+        if (candidates.Count == 0)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2: no new references to move.");
+            return;
+        }
+
+        var vanillaCellOverride = vanillaCellContext.GetOrAddAsOverride(state.PatchMod);
+        var bceCellOverride = bceCellContext.GetOrAddAsOverride(state.PatchMod);
+
+        var movedCount = 0;
+        foreach (var placed in candidates)
+        {
+            var shouldBePersistent = winningPersistentRefs.Contains(placed.FormKey) || !winningTemporaryRefs.Contains(placed.FormKey);
+            var copied = ClonePlaced(placed);
+
+            RemovePlacedByFormKey(vanillaCellOverride.Persistent, placed.FormKey);
+            RemovePlacedByFormKey(vanillaCellOverride.Temporary, placed.FormKey);
+            RemovePlacedByFormKey(bceCellOverride.Persistent, placed.FormKey);
+            RemovePlacedByFormKey(bceCellOverride.Temporary, placed.FormKey);
+
+            if (shouldBePersistent)
+            {
+                bceCellOverride.Persistent.Add(copied);
+            }
+            else
+            {
+                bceCellOverride.Temporary.Add(copied);
+            }
+
+            movedCount++;
+
+            if (settings.Debug)
+            {
+                var destination = shouldBePersistent ? "Persistent" : "Temporary";
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Moved {placed.FormKey} -> BCE {destination}.");
+            }
+        }
+
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2: moved {movedCount} references to BCE cell.");
+    }
+
+    private static IPlaced ClonePlaced(IPlacedGetter placed)
+    {
+        return placed switch
+        {
+            IPlacedObjectGetter placedObject => placedObject.DeepCopy(),
+            IPlacedNpcGetter placedNpc => placedNpc.DeepCopy(),
+            IAPlacedTrapGetter placedTrap => placedTrap.DeepCopy(),
+            _ => throw new InvalidOperationException($"Unsupported placed record type: {placed.GetType().Name}")
+        };
+    }
+
+    private static HashSet<ModKey> ParseBlacklist(IEnumerable<string> rawBlacklist)
+    {
+        var result = new HashSet<ModKey>();
+
+        foreach (var item in rawBlacklist)
+        {
+            var trimmed = item.Trim();
+            if (string.IsNullOrWhiteSpace(trimmed))
+            {
+                continue;
+            }
+
+            if (ModKey.TryFromNameAndExtension(trimmed, out var modKey))
+            {
+                result.Add(modKey);
+            }
+        }
+
+        return result;
+    }
+
+    private static bool RemovePlacedByFormKey(IList<IPlaced> list, FormKey formKey)
+    {
+        var removed = false;
+        for (var i = list.Count - 1; i >= 0; i--)
+        {
+            if (list[i].FormKey != formKey)
+            {
+                continue;
+            }
+
+            list.RemoveAt(i);
+            removed = true;
+        }
+
+        return removed;
     }
 }
