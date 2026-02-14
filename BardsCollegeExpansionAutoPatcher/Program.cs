@@ -475,6 +475,17 @@ public static class Program
                 continue;
             }
 
+            if (string.Equals(targetProperty.Name, "Base", StringComparison.Ordinal)
+                || string.Equals(targetProperty.Name, "EnableParent", StringComparison.Ordinal))
+            {
+                if (TryAssignCompositeProperty(targetRecord, targetProperty, winningValue, settings))
+                {
+                    changedAny = true;
+                }
+
+                continue;
+            }
+
             if (!TryCloneForAssignment(winningValue, out var assignmentValue))
             {
                 if (settings.Debug)
@@ -510,6 +521,244 @@ public static class Program
         }
 
         return changedAny;
+    }
+
+    private static bool TryAssignCompositeProperty(object targetRecord, PropertyInfo targetProperty, object? winningValue, Settings settings)
+    {
+        if (winningValue is null)
+        {
+            try
+            {
+                targetProperty.SetValue(targetRecord, null);
+                return true;
+            }
+            catch
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: skipped '{targetProperty.Name}' on {GetRecordIdentity(targetRecord)} (null not assignable).");
+                }
+
+                return false;
+            }
+        }
+
+        if (targetProperty.PropertyType.IsInstanceOfType(winningValue))
+        {
+            var assignValue = winningValue;
+            if (TryCloneForAssignment(winningValue, out var clonedValue))
+            {
+                assignValue = clonedValue;
+            }
+
+            try
+            {
+                targetProperty.SetValue(targetRecord, assignValue);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: failed direct assign for '{targetProperty.Name}' on {GetRecordIdentity(targetRecord)}: {ex.GetType().Name}");
+                }
+            }
+        }
+
+        if (TryCreateCompositeForTarget(winningValue, targetProperty.PropertyType, out var convertedValue))
+        {
+            try
+            {
+                targetProperty.SetValue(targetRecord, convertedValue);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: failed setting '{targetProperty.Name}' on {GetRecordIdentity(targetRecord)}: {ex.GetType().Name}");
+                }
+            }
+        }
+
+        if (settings.Debug)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: skipped '{targetProperty.Name}' on {GetRecordIdentity(targetRecord)} (could not map sub-values).");
+        }
+
+        return false;
+    }
+
+    private static bool TryCreateCompositeForTarget(object sourceValue, Type targetType, out object? targetValue)
+    {
+        targetValue = null;
+
+        object? created;
+        try
+        {
+            created = System.Activator.CreateInstance(targetType);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (created is null)
+        {
+            return false;
+        }
+
+        var wroteAny = false;
+        var targetMembers = targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance)
+            .Where(x => x.CanWrite && x.GetIndexParameters().Length == 0);
+
+        foreach (var targetMember in targetMembers)
+        {
+            var sourceMember = sourceValue.GetType().GetProperty(targetMember.Name, BindingFlags.Public | BindingFlags.Instance);
+            if (sourceMember is null || !sourceMember.CanRead || sourceMember.GetIndexParameters().Length > 0)
+            {
+                continue;
+            }
+
+            var sourceMemberValue = sourceMember.GetValue(sourceValue);
+            if (!TryConvertMemberValue(sourceMemberValue, targetMember.PropertyType, out var convertedMemberValue))
+            {
+                continue;
+            }
+
+            try
+            {
+                targetMember.SetValue(created, convertedMemberValue);
+                wroteAny = true;
+            }
+            catch
+            {
+            }
+        }
+
+        if (!wroteAny)
+        {
+            return false;
+        }
+
+        targetValue = created;
+        return true;
+    }
+
+    private static bool TryConvertMemberValue(object? sourceValue, Type targetType, out object? convertedValue)
+    {
+        convertedValue = null;
+
+        if (sourceValue is null)
+        {
+            return true;
+        }
+
+        if (targetType.IsInstanceOfType(sourceValue))
+        {
+            if (TryCloneForAssignment(sourceValue, out convertedValue))
+            {
+                return true;
+            }
+        }
+
+        if (TryConvertByFormKey(sourceValue, targetType, out convertedValue))
+        {
+            return true;
+        }
+
+        if (TryConvertNumeric(sourceValue, targetType, out convertedValue))
+        {
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryConvertByFormKey(object sourceValue, Type targetType, out object? convertedValue)
+    {
+        convertedValue = null;
+        if (!TryGetFormKey(sourceValue, out var sourceFormKey))
+        {
+            return false;
+        }
+
+        object? targetObject;
+        try
+        {
+            targetObject = System.Activator.CreateInstance(targetType);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (targetObject is null)
+        {
+            return false;
+        }
+
+        var targetFormKeyProperty = targetType.GetProperty("FormKey", BindingFlags.Public | BindingFlags.Instance);
+        if (targetFormKeyProperty is null || !targetFormKeyProperty.CanWrite || targetFormKeyProperty.PropertyType != typeof(FormKey))
+        {
+            return false;
+        }
+
+        targetFormKeyProperty.SetValue(targetObject, sourceFormKey);
+
+        var sourceIsNullProperty = sourceValue.GetType().GetProperty("IsNull", BindingFlags.Public | BindingFlags.Instance);
+        var targetIsNullProperty = targetType.GetProperty("IsNull", BindingFlags.Public | BindingFlags.Instance);
+        if (sourceIsNullProperty is not null
+            && targetIsNullProperty is not null
+            && sourceIsNullProperty.CanRead
+            && targetIsNullProperty.CanWrite
+            && sourceIsNullProperty.PropertyType == typeof(bool)
+            && targetIsNullProperty.PropertyType == typeof(bool))
+        {
+            var sourceIsNull = sourceIsNullProperty.GetValue(sourceValue);
+            if (sourceIsNull is bool b)
+            {
+                targetIsNullProperty.SetValue(targetObject, b);
+            }
+        }
+
+        convertedValue = targetObject;
+        return true;
+    }
+
+    private static bool TryConvertNumeric(object sourceValue, Type targetType, out object? convertedValue)
+    {
+        convertedValue = null;
+        var underlyingTargetType = Nullable.GetUnderlyingType(targetType) ?? targetType;
+        if (!IsNumericType(underlyingTargetType))
+        {
+            return false;
+        }
+
+        try
+        {
+            convertedValue = Convert.ChangeType(sourceValue, underlyingTargetType, CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool IsNumericType(Type type)
+    {
+        return type == typeof(byte)
+            || type == typeof(sbyte)
+            || type == typeof(short)
+            || type == typeof(ushort)
+            || type == typeof(int)
+            || type == typeof(uint)
+            || type == typeof(long)
+            || type == typeof(ulong)
+            || type == typeof(float)
+            || type == typeof(double)
+            || type == typeof(decimal);
     }
 
     private static bool TryAssignPlacement(object targetRecord, PropertyInfo targetProperty, object? winningValue, Settings settings)
