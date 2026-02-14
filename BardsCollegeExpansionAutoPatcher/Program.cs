@@ -28,6 +28,9 @@ public static class Program
         "Base",
         "Placement",
         "Scale",
+        "Emittance",
+        "LightData",
+        "Radius",
         "EnableParent",
         "MajorFlags",
         "Flags",
@@ -344,10 +347,6 @@ public static class Program
 
             var originalRecord = sourceContext.Typed.Record;
             var winningRecord = winningContext.Typed.Record;
-            if (winningRecord.Equals(originalRecord))
-            {
-                continue;
-            }
 
             var cell2Link = pair.Value.ToLink<IPlacedGetter>();
             if (!cell2Link.TryResolveContext<ISkyrimMod, ISkyrimModGetter, IPlaced, IPlacedGetter>(state.LinkCache, out var cell2Context))
@@ -476,7 +475,8 @@ public static class Program
             }
 
             if (string.Equals(targetProperty.Name, "Base", StringComparison.Ordinal)
-                || string.Equals(targetProperty.Name, "EnableParent", StringComparison.Ordinal))
+                || string.Equals(targetProperty.Name, "EnableParent", StringComparison.Ordinal)
+                || string.Equals(targetProperty.Name, "LightData", StringComparison.Ordinal))
             {
                 if (TryAssignCompositeProperty(targetRecord, targetProperty, winningValue, settings))
                 {
@@ -488,6 +488,17 @@ public static class Program
 
             if (!TryCloneForAssignment(winningValue, out var assignmentValue))
             {
+                if (string.Equals(targetProperty.Name, "Emittance", StringComparison.Ordinal)
+                    || string.Equals(targetProperty.Name, "Radius", StringComparison.Ordinal))
+                {
+                    if (TryAssignCompositeProperty(targetRecord, targetProperty, winningValue, settings))
+                    {
+                        changedAny = true;
+                    }
+
+                    continue;
+                }
+
                 if (settings.Debug)
                 {
                     Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: skipped '{targetProperty.Name}' on {GetRecordIdentity(targetRecord)} (value cannot be safely cloned).");

@@ -23,7 +23,7 @@
 - [x] Compare winning overrides of Cell1 refs against their original ESM definitions
 - [x] Detect changes to base record, placement, enable parent, flags, etc.
 - [x] Apply same changes to corresponding Cell2 (BCE) refs
-- [ ] Verify
+- [x] Verify
 
 ## Phase 4: Swap Cell/Ref References in Other Plugins
 - [ ] Scan conditions, packages, etc. for references to SolitudeBardsCollege
