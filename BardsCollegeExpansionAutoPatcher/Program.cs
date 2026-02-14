@@ -1,4 +1,6 @@
 using System.Collections;
+using System.Globalization;
+using System.Reflection;
 using Mutagen.Bethesda;
 using Mutagen.Bethesda.Plugins;
 using Mutagen.Bethesda.Plugins.Cache;
@@ -20,6 +22,22 @@ public static class Program
         ModKey.FromNameAndExtension("Dawnguard.esm"),
         ModKey.FromNameAndExtension("HearthFires.esm"),
         ModKey.FromNameAndExtension("Dragonborn.esm")
+    ];
+    private static readonly HashSet<string> SyncedPlacedPropertyNames =
+    [
+        "Base",
+        "Placement",
+        "Scale",
+        "EnableParent",
+        "MajorFlags",
+        "Flags",
+        "Ownership",
+        "LockData",
+        "LinkedReferences",
+        "ActivateParents",
+        "Primitive",
+        "LocationRefType",
+        "TeleportDestination"
     ];
 
     private static Lazy<Settings> _settings = null!;
@@ -348,7 +366,7 @@ public static class Program
                 continue;
             }
 
-            if (!ApplyChangedProperties(originalRecord, winningRecord, cell2Override))
+            if (!ApplyChangedProperties(originalRecord, winningRecord, cell2Override, settings))
             {
                 continue;
             }
@@ -403,7 +421,7 @@ public static class Program
         };
     }
 
-    private static bool ApplyChangedProperties(object originalRecord, object winningRecord, object targetRecord)
+    private static bool ApplyChangedProperties(object originalRecord, object winningRecord, object targetRecord, Settings settings)
     {
         var changedAny = false;
         var targetType = targetRecord.GetType();
@@ -427,6 +445,11 @@ public static class Program
                 continue;
             }
 
+            if (!SyncedPlacedPropertyNames.Contains(targetProperty.Name))
+            {
+                continue;
+            }
+
             var originalProperty = originalType.GetProperty(targetProperty.Name);
             var winningProperty = winningType.GetProperty(targetProperty.Name);
             if (originalProperty is null || winningProperty is null || !originalProperty.CanRead || !winningProperty.CanRead)
@@ -442,39 +465,295 @@ public static class Program
                 continue;
             }
 
-            var assignmentValue = CloneForAssignment(winningValue);
-            if (assignmentValue is not null && !targetProperty.PropertyType.IsInstanceOfType(assignmentValue))
+            if (string.Equals(targetProperty.Name, "Placement", StringComparison.Ordinal))
             {
+                if (TryAssignPlacement(targetRecord, targetProperty, winningValue, settings))
+                {
+                    changedAny = true;
+                }
+
                 continue;
             }
 
-            targetProperty.SetValue(targetRecord, assignmentValue);
-            changedAny = true;
+            if (!TryCloneForAssignment(winningValue, out var assignmentValue))
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: skipped '{targetProperty.Name}' on {GetRecordIdentity(targetRecord)} (value cannot be safely cloned).");
+                }
+
+                continue;
+            }
+
+            if (assignmentValue is not null && !targetProperty.PropertyType.IsInstanceOfType(assignmentValue))
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: skipped '{targetProperty.Name}' on {GetRecordIdentity(targetRecord)} (type mismatch).");
+                }
+
+                continue;
+            }
+
+            try
+            {
+                targetProperty.SetValue(targetRecord, assignmentValue);
+                changedAny = true;
+            }
+            catch (Exception ex)
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: failed setting '{targetProperty.Name}' on {GetRecordIdentity(targetRecord)}: {ex.GetType().Name}");
+                }
+            }
         }
 
         return changedAny;
     }
 
-    private static object? CloneForAssignment(object? value)
+    private static bool TryAssignPlacement(object targetRecord, PropertyInfo targetProperty, object? winningValue, Settings settings)
+    {
+        if (winningValue is null)
+        {
+            try
+            {
+                targetProperty.SetValue(targetRecord, null);
+                return true;
+            }
+            catch
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: skipped 'Placement' on {GetRecordIdentity(targetRecord)} (null placement not assignable).");
+                }
+
+                return false;
+            }
+        }
+
+        if (TryCloneForAssignment(winningValue, out var clonedPlacement)
+            && clonedPlacement is not null
+            && targetProperty.PropertyType.IsInstanceOfType(clonedPlacement))
+        {
+            try
+            {
+                targetProperty.SetValue(targetRecord, clonedPlacement);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: failed setting cloned Placement on {GetRecordIdentity(targetRecord)}: {ex.GetType().Name}");
+                }
+            }
+        }
+
+        if (!TryCreatePlacementForTarget(winningValue, targetProperty.PropertyType, out var convertedPlacement))
+        {
+            if (settings.Debug)
+            {
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: skipped 'Placement' on {GetRecordIdentity(targetRecord)} (could not convert placement type).");
+            }
+
+            return false;
+        }
+
+        try
+        {
+            targetProperty.SetValue(targetRecord, convertedPlacement);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            if (settings.Debug)
+            {
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: failed setting converted Placement on {GetRecordIdentity(targetRecord)}: {ex.GetType().Name}");
+            }
+
+            return false;
+        }
+    }
+
+    private static bool TryCreatePlacementForTarget(object sourcePlacement, Type targetPlacementType, out object? targetPlacement)
+    {
+        targetPlacement = null;
+
+        if (!TryReadVector3(sourcePlacement, "Position", out var sourcePosition)
+            || !TryReadVector3(sourcePlacement, "Rotation", out var sourceRotation))
+        {
+            return false;
+        }
+
+        object? created;
+        try
+        {
+            created = System.Activator.CreateInstance(targetPlacementType);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (created is null)
+        {
+            return false;
+        }
+
+        if (!TryWriteVector3(created, "Position", sourcePosition) || !TryWriteVector3(created, "Rotation", sourceRotation))
+        {
+            return false;
+        }
+
+        targetPlacement = created;
+        return true;
+    }
+
+    private static bool TryReadVector3(object owner, string propertyName, out (double X, double Y, double Z) value)
+    {
+        value = default;
+        var property = owner.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
+        if (property is null || !property.CanRead)
+        {
+            return false;
+        }
+
+        var vector = property.GetValue(owner);
+        if (vector is null)
+        {
+            return false;
+        }
+
+        if (!TryReadNumericMember(vector, "X", out var x)
+            || !TryReadNumericMember(vector, "Y", out var y)
+            || !TryReadNumericMember(vector, "Z", out var z))
+        {
+            return false;
+        }
+
+        value = (x, y, z);
+        return true;
+    }
+
+    private static bool TryWriteVector3(object owner, string propertyName, (double X, double Y, double Z) value)
+    {
+        var property = owner.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
+        if (property is null || !property.CanWrite)
+        {
+            return false;
+        }
+
+        object? vector;
+        try
+        {
+            vector = System.Activator.CreateInstance(property.PropertyType);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (vector is null)
+        {
+            return false;
+        }
+
+        if (!TryWriteNumericMember(vector, "X", value.X)
+            || !TryWriteNumericMember(vector, "Y", value.Y)
+            || !TryWriteNumericMember(vector, "Z", value.Z))
+        {
+            return false;
+        }
+
+        property.SetValue(owner, vector);
+        return true;
+    }
+
+    private static bool TryReadNumericMember(object owner, string memberName, out double value)
+    {
+        value = default;
+        var property = owner.GetType().GetProperty(memberName, BindingFlags.Public | BindingFlags.Instance);
+        if (property is null || !property.CanRead)
+        {
+            return false;
+        }
+
+        var raw = property.GetValue(owner);
+        if (raw is null)
+        {
+            return false;
+        }
+
+        try
+        {
+            value = Convert.ToDouble(raw, CultureInfo.InvariantCulture);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static bool TryWriteNumericMember(object owner, string memberName, double value)
+    {
+        var property = owner.GetType().GetProperty(memberName, BindingFlags.Public | BindingFlags.Instance);
+        if (property is null || !property.CanWrite)
+        {
+            return false;
+        }
+
+        var targetType = Nullable.GetUnderlyingType(property.PropertyType) ?? property.PropertyType;
+
+        object converted;
+        try
+        {
+            converted = Convert.ChangeType(value, targetType, CultureInfo.InvariantCulture);
+        }
+        catch
+        {
+            return false;
+        }
+
+        property.SetValue(owner, converted);
+        return true;
+    }
+
+    private static bool TryCloneForAssignment(object? value, out object? clonedValue)
     {
         if (value is null)
         {
-            return null;
+            clonedValue = null;
+            return true;
         }
 
         var valueType = value.GetType();
         if (valueType.IsValueType || value is string)
         {
-            return value;
+            clonedValue = value;
+            return true;
         }
 
         var deepCopyMethod = valueType.GetMethod("DeepCopy", Type.EmptyTypes);
         if (deepCopyMethod is not null)
         {
-            return deepCopyMethod.Invoke(value, null);
+            clonedValue = deepCopyMethod.Invoke(value, null);
+            return true;
         }
 
-        return value;
+        clonedValue = null;
+        return false;
+    }
+
+    private static string GetRecordIdentity(object record)
+    {
+        if (TryGetFormKey(record, out var formKey))
+        {
+            return formKey.ToString();
+        }
+
+        return record.GetType().Name;
     }
 
     private static bool ValuesEqual(object? left, object? right)
