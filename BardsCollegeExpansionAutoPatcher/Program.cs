@@ -76,14 +76,18 @@ public static class Program
             Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Warning: Cell1 mapping contains non-00 load-order prefixes.");
         }
 
-        MoveNewReferencesToBceCell(state, settings, refMapping);
-        SyncMappedReferencesToBce(state, settings, refMapping);
+        var intentionallyModifiedFormKeys = new HashSet<FormKey>();
+
+        MoveNewReferencesToBceCell(state, settings, refMapping, intentionallyModifiedFormKeys);
+        SyncMappedReferencesToBce(state, settings, refMapping, intentionallyModifiedFormKeys);
+        CleanupUnintentionalPatchRecords(state, intentionallyModifiedFormKeys, settings);
     }
 
     private static void MoveNewReferencesToBceCell(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
-        RefMapping refMapping)
+        RefMapping refMapping,
+        HashSet<FormKey> intentionallyModifiedFormKeys)
     {
         var winningCells = state.LoadOrder.PriorityOrder
             .Cell()
@@ -142,6 +146,16 @@ public static class Program
                 continue;
             }
 
+            if (!IsTrulyNewReference(state, placed.FormKey))
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2: skipped {placed.FormKey} (override of existing reference, not a net-new placed ref).");
+                }
+
+                continue;
+            }
+
             candidates.Add(placed);
         }
 
@@ -175,6 +189,7 @@ public static class Program
             }
 
             movedCount++;
+            intentionallyModifiedFormKeys.Add(placed.FormKey);
 
             if (settings.Debug)
             {
@@ -183,6 +198,8 @@ public static class Program
             }
         }
 
+        intentionallyModifiedFormKeys.Add(vanillaCellOverride.FormKey);
+        intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2: moved {movedCount} references to BCE cell.");
     }
 
@@ -235,10 +252,30 @@ public static class Program
         return removed;
     }
 
+    private static bool IsTrulyNewReference(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        FormKey formKey)
+    {
+        var contexts = formKey
+            .ToLink<IPlacedGetter>()
+            .ResolveAllSimpleContexts<IPlacedGetter>(state.LinkCache)
+            .Where(x => x.ModKey != state.PatchMod.ModKey)
+            .ToList();
+
+        if (contexts.Count == 0)
+        {
+            return true;
+        }
+
+        // If any vanilla context exists in the history, this is an override chain on an existing record.
+        return !contexts.Any(x => VanillaMasterModKeys.Contains(x.ModKey));
+    }
+
     private static void SyncMappedReferencesToBce(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
-        RefMapping refMapping)
+        RefMapping refMapping,
+        HashSet<FormKey> intentionallyModifiedFormKeys)
     {
         var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
         var loadOrderIndex = state.LoadOrder.ListedOrder
@@ -317,6 +354,7 @@ public static class Program
             }
 
             changed++;
+            intentionallyModifiedFormKeys.Add(cell2Override.FormKey);
 
             if (settings.Debug)
             {
@@ -325,6 +363,28 @@ public static class Program
         }
 
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: evaluated {evaluated} mapped refs, synced {changed}.");
+    }
+
+    private static void CleanupUnintentionalPatchRecords(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        Settings settings)
+    {
+        var allPatchRecordKeys = state.PatchMod
+            .EnumerateMajorRecords()
+            .Select(record => record.FormKey)
+            .ToHashSet();
+
+        var totalBeforeCleanup = allPatchRecordKeys.Count;
+        allPatchRecordKeys.ExceptWith(intentionallyModifiedFormKeys);
+        var removedCount = allPatchRecordKeys.Count;
+        if (removedCount > 0)
+        {
+            state.PatchMod.Remove(allPatchRecordKeys);
+        }
+
+        var keptCount = totalBeforeCleanup - removedCount;
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Cleanup: kept {keptCount} intentional records, removed {removedCount} non-intentional records.");
     }
 
     private static bool HaveMatchingPlacedKind(object left, object right)
@@ -429,6 +489,16 @@ public static class Program
             return false;
         }
 
+        if (TryGetIsNull(left, out var leftIsNull) && TryGetIsNull(right, out var rightIsNull) && leftIsNull && rightIsNull)
+        {
+            return true;
+        }
+
+        if (TryGetFormKey(left, out var leftFormKey) && TryGetFormKey(right, out var rightFormKey))
+        {
+            return leftFormKey == rightFormKey;
+        }
+
         if (left is IEnumerable leftEnumerable && right is IEnumerable rightEnumerable && left is not string && right is not string)
         {
             var leftList = leftEnumerable.Cast<object?>().ToList();
@@ -450,5 +520,43 @@ public static class Program
         }
 
         return left.Equals(right);
+    }
+
+    private static bool TryGetFormKey(object value, out FormKey formKey)
+    {
+        formKey = default;
+        var property = value.GetType().GetProperty("FormKey");
+        if (property is null || property.PropertyType != typeof(FormKey))
+        {
+            return false;
+        }
+
+        var raw = property.GetValue(value);
+        if (raw is not FormKey key)
+        {
+            return false;
+        }
+
+        formKey = key;
+        return true;
+    }
+
+    private static bool TryGetIsNull(object value, out bool isNull)
+    {
+        isNull = false;
+        var property = value.GetType().GetProperty("IsNull");
+        if (property is null || property.PropertyType != typeof(bool))
+        {
+            return false;
+        }
+
+        var raw = property.GetValue(value);
+        if (raw is not bool valueIsNull)
+        {
+            return false;
+        }
+
+        isNull = valueIsNull;
+        return true;
     }
 }
