@@ -26,9 +26,9 @@
 - [x] Verify
 
 ## Phase 4: Swap Cell/Ref References in Other Plugins
-- [ ] Scan conditions, packages, etc. for references to SolitudeBardsCollege
-- [ ] Replace with kgcBardHijackSolitudeBardsCollege
-- [ ] Scan for references to Cell1 placed refs and swap to Cell2
+- [x] Scan conditions, packages, etc. for references to SolitudeBardsCollege
+- [x] Replace with kgcBardHijackSolitudeBardsCollege
+- [x] Scan for references to Cell1 placed refs and swap to Cell2
 - [ ] Verify
 
 ## Phase 5: Cleanup & Polish

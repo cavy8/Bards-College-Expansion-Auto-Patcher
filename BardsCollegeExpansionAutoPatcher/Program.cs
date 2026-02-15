@@ -42,6 +42,13 @@ public static class Program
         "LocationRefType",
         "TeleportDestination"
     ];
+    private static readonly HashSet<string> ExcludedCellPropertyNames =
+    [
+        "FormKey",
+        "EditorID",
+        "Persistent",
+        "Temporary"
+    ];
 
     private static Lazy<Settings> _settings = null!;
 
@@ -101,6 +108,7 @@ public static class Program
 
         MoveNewReferencesToBceCell(state, settings, refMapping, intentionallyModifiedFormKeys);
         SyncMappedReferencesToBce(state, settings, refMapping, intentionallyModifiedFormKeys);
+        SwapCellAndReferencePointers(state, settings, refMapping, intentionallyModifiedFormKeys);
         CleanupUnintentionalPatchRecords(state, intentionallyModifiedFormKeys, settings);
     }
 
@@ -380,6 +388,219 @@ public static class Program
         }
 
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: evaluated {evaluated} mapped refs, synced {changed}.");
+
+        SyncBardsCollegeCellChanges(state, settings, intentionallyModifiedFormKeys);
+    }
+
+    private static void SyncBardsCollegeCellChanges(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        HashSet<FormKey> intentionallyModifiedFormKeys)
+    {
+        var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
+        var loadOrderIndex = state.LoadOrder.ListedOrder
+            .Select((listing, index) => (listing.ModKey, index))
+            .ToDictionary(x => x.ModKey, x => x.index);
+
+        var vanillaCellLink = VanillaBardsCollegeCell.ToLink<ICellGetter>();
+        var allVanillaCellContexts = vanillaCellLink
+            .ResolveAllSimpleContexts<ICellGetter>(state.LinkCache)
+            .Select(x => (Typed: x, Untyped: (IModContext)x))
+            .Where(x => x.Untyped.ModKey != state.PatchMod.ModKey)
+            .ToList();
+
+        if (allVanillaCellContexts.Count == 0)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: no contexts found for {VanillaBardsCollegeCell}.");
+            return;
+        }
+
+        var sourceContext = allVanillaCellContexts.FirstOrDefault(x => x.Untyped.ModKey == VanillaBardsCollegeCell.ModKey);
+        if (sourceContext.Typed is null)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: source context missing for {VanillaBardsCollegeCell}.");
+            return;
+        }
+
+        var winningContext = allVanillaCellContexts
+            .Where(x => !blacklistedMods.Contains(x.Untyped.ModKey))
+            .OrderBy(x => loadOrderIndex.TryGetValue(x.Untyped.ModKey, out var index) ? index : int.MinValue)
+            .LastOrDefault();
+
+        if (winningContext.Typed is null)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: winning context missing for {VanillaBardsCollegeCell}.");
+            return;
+        }
+
+        var winningModKey = winningContext.Untyped.ModKey;
+        if (VanillaMasterModKeys.Contains(winningModKey) || winningModKey == BceModKey || blacklistedMods.Contains(winningModKey))
+        {
+            if (settings.Debug)
+            {
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: skipped (winning mod {winningModKey.FileName} is excluded).");
+            }
+
+            return;
+        }
+
+        var bceCellLink = BceBardsCollegeCell.ToLink<ICellGetter>();
+        if (!bceCellLink.TryResolveContext<ISkyrimMod, ISkyrimModGetter, ICell, ICellGetter>(state.LinkCache, out var bceCellContext))
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: could not resolve BCE cell {BceBardsCollegeCell}.");
+            return;
+        }
+
+        var bceCellOverride = bceCellContext.GetOrAddAsOverride(state.PatchMod);
+        var changedAny = ApplyChangedCellProperties(sourceContext.Typed.Record, winningContext.Typed.Record, bceCellOverride, settings);
+        if (!changedAny)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: no cell-level changes to mirror.");
+            return;
+        }
+
+        intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: mirrored cell-level changes from {winningModKey.FileName} to BCE cell.");
+    }
+
+    private static bool ApplyChangedCellProperties(
+        object originalRecord,
+        object winningRecord,
+        object targetRecord,
+        Settings settings)
+    {
+        var changedAny = false;
+        var targetType = targetRecord.GetType();
+        var originalType = originalRecord.GetType();
+        var winningType = winningRecord.GetType();
+
+        foreach (var targetProperty in targetType.GetProperties())
+        {
+            if (!targetProperty.CanRead || !targetProperty.CanWrite)
+            {
+                continue;
+            }
+
+            if (targetProperty.GetIndexParameters().Length > 0)
+            {
+                continue;
+            }
+
+            if (ExcludedCellPropertyNames.Contains(targetProperty.Name))
+            {
+                continue;
+            }
+
+            var originalProperty = originalType.GetProperty(targetProperty.Name);
+            var winningProperty = winningType.GetProperty(targetProperty.Name);
+            if (originalProperty is null || winningProperty is null || !originalProperty.CanRead || !winningProperty.CanRead)
+            {
+                continue;
+            }
+
+            var originalValue = originalProperty.GetValue(originalRecord);
+            var winningValue = winningProperty.GetValue(winningRecord);
+            if (ValuesEqual(originalValue, winningValue))
+            {
+                continue;
+            }
+
+            if (TryAssignCompositeProperty(targetRecord, targetProperty, winningValue, settings))
+            {
+                changedAny = true;
+                continue;
+            }
+
+            if (settings.Debug)
+            {
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: skipped '{targetProperty.Name}' on {GetRecordIdentity(targetRecord)}.");
+            }
+        }
+
+        return changedAny;
+    }
+
+    private static void SwapCellAndReferencePointers(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        RefMapping refMapping,
+        HashSet<FormKey> intentionallyModifiedFormKeys)
+    {
+        var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
+        var swapMap = BuildSwapMap(refMapping);
+
+        var evaluatedRecords = 0;
+        var qualifyingRecords = 0;
+        var swappedRecords = 0;
+        var swappedLinks = 0;
+
+        foreach (var context in state.LoadOrder.ListedOrder.WinningContextOverrides<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>(state.LinkCache))
+        {
+            evaluatedRecords++;
+            var sourceModKey = context.ModKey;
+            if (sourceModKey == state.PatchMod.ModKey
+                || sourceModKey == BceModKey
+                || VanillaMasterModKeys.Contains(sourceModKey)
+                || blacklistedMods.Contains(sourceModKey))
+            {
+                continue;
+            }
+
+            if (context.Record is not IFormLinkContainerGetter recordWithLinks)
+            {
+                continue;
+            }
+
+            var matchedLinksInRecord = recordWithLinks
+                .EnumerateFormLinks()
+                .Count(link => swapMap.ContainsKey(link.FormKey));
+            if (matchedLinksInRecord == 0)
+            {
+                continue;
+            }
+
+            qualifyingRecords++;
+
+            var overrideRecord = context.GetOrAddAsOverride(state.PatchMod);
+            if (overrideRecord is not IFormLinkContainer mutableRecord)
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: skipped {context.Record.FormKey} (not mutable FormLink container).");
+                }
+
+                continue;
+            }
+
+            mutableRecord.RemapLinks(swapMap);
+            swappedRecords++;
+            swappedLinks += matchedLinksInRecord;
+            intentionallyModifiedFormKeys.Add(overrideRecord.FormKey);
+
+            if (settings.Debug)
+            {
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: remapped {matchedLinksInRecord} links in {overrideRecord.FormKey} from {sourceModKey.FileName}.");
+            }
+        }
+
+        Console.WriteLine(
+            $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: evaluated {evaluatedRecords} winning records, "
+            + $"found {qualifyingRecords} with BCE swaps, remapped {swappedLinks} links across {swappedRecords} records.");
+    }
+
+    private static Dictionary<FormKey, FormKey> BuildSwapMap(RefMapping refMapping)
+    {
+        var map = new Dictionary<FormKey, FormKey>(refMapping.Cell1ToCell2.Count + 1)
+        {
+            [VanillaBardsCollegeCell] = BceBardsCollegeCell
+        };
+
+        foreach (var pair in refMapping.Cell1ToCell2)
+        {
+            map[pair.Key] = pair.Value;
+        }
+
+        return map;
     }
 
     private static void CleanupUnintentionalPatchRecords(
