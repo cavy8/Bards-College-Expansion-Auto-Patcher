@@ -154,6 +154,16 @@ public static class Program
                 continue;
             }
 
+            if (IsRoomMarkerPlacedReference(state, placed))
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2: skipped {placed.FormKey} (room marker).");
+                }
+
+                continue;
+            }
+
             var sourceMod = placed.FormKey.ModKey;
             if (VanillaMasterModKeys.Contains(sourceMod))
             {
@@ -230,6 +240,41 @@ public static class Program
         intentionallyModifiedFormKeys.Add(vanillaCellOverride.FormKey);
         intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2: moved {movedCount} references to BCE cell.");
+    }
+
+    private static bool IsRoomMarkerPlacedReference(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        IPlacedGetter placed)
+    {
+        if (placed is not IPlacedObjectGetter placedObject)
+        {
+            return false;
+        }
+
+        var baseFormKey = placedObject.Base.FormKey;
+        if (baseFormKey.IsNull)
+        {
+            return false;
+        }
+
+        if (!state.LinkCache.TryResolve<IMajorRecordGetter>(baseFormKey, out var baseRecord))
+        {
+            return false;
+        }
+
+        var editorIdProperty = baseRecord.GetType().GetProperty("EditorID", BindingFlags.Public | BindingFlags.Instance);
+        if (editorIdProperty is null || !editorIdProperty.CanRead)
+        {
+            return false;
+        }
+
+        var editorId = editorIdProperty.GetValue(baseRecord) as string;
+        if (string.IsNullOrWhiteSpace(editorId))
+        {
+            return false;
+        }
+
+        return editorId.Contains("RoomMarker", StringComparison.OrdinalIgnoreCase);
     }
 
     private static IPlaced ClonePlaced(IPlacedGetter placed)
