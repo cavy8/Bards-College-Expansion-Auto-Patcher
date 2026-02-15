@@ -15,6 +15,8 @@ public static class Program
     private static readonly ModKey BceModKey = ModKey.FromNameAndExtension("kinggathcreations_bard.esm");
     private static readonly FormKey VanillaBardsCollegeCell = new(ModKey.FromNameAndExtension("Skyrim.esm"), 0x016A0C);
     private static readonly FormKey BceBardsCollegeCell = new(BceModKey, 0x01F0F8);
+    private static readonly FormKey VanillaWinkingSkeeverCell = new(ModKey.FromNameAndExtension("Skyrim.esm"), 0x016A0E);
+    private static readonly FormKey BceWinkingSkeeverCell = new(BceModKey, 0x01F0F7);
     private static readonly HashSet<ModKey> VanillaMasterModKeys =
     [
         ModKey.FromNameAndExtension("Skyrim.esm"),
@@ -79,36 +81,57 @@ public static class Program
             state.PatchMod.ModHeader.MasterReferences.Add(new MasterReference { Master = BceModKey });
         }
 
-        var csvPath = Path.Combine(AppContext.BaseDirectory, "BardsCollegeMatchingRefs.csv");
-        if (!File.Exists(csvPath))
+        var bardsCsvPath = Path.Combine(AppContext.BaseDirectory, "BardsCollegeMatchingRefs.csv");
+        if (!File.Exists(bardsCsvPath))
         {
-            throw new FileNotFoundException($"Could not locate bundled CSV file at '{csvPath}'.", csvPath);
+            throw new FileNotFoundException($"Could not locate bundled CSV file at '{bardsCsvPath}'.", bardsCsvPath);
         }
 
-        var refMapping = RefMapping.Load(csvPath);
+        var winkingCsvPath = Path.Combine(AppContext.BaseDirectory, "WinkingSkeeverMatchingRefs.csv");
+        if (!File.Exists(winkingCsvPath))
+        {
+            throw new FileNotFoundException($"Could not locate bundled CSV file at '{winkingCsvPath}'.", winkingCsvPath);
+        }
+
+        var bardsRefMapping = RefMapping.Load(bardsCsvPath);
+        var winkingRefMapping = RefMapping.Load(winkingCsvPath);
 
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] BCE detected: {BceModKey.FileName}");
-        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Loaded {refMapping.Cell1ToCell2.Count} reference mappings.");
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Loaded {bardsRefMapping.Cell1ToCell2.Count} Bards College reference mappings.");
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Loaded {winkingRefMapping.Cell1ToCell2.Count} Winking Skeever reference mappings.");
 
         if (settings.Debug)
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Vanilla cell: {VanillaBardsCollegeCell}");
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] BCE cell: {BceBardsCollegeCell}");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Bards vanilla cell: {VanillaBardsCollegeCell}");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Bards BCE cell: {BceBardsCollegeCell}");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Winking Skeever vanilla cell: {VanillaWinkingSkeeverCell}");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Winking Skeever BCE cell: {BceWinkingSkeeverCell}");
             Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Blacklist size: {settings.BlacklistedPlugins.Count}");
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Cell1 CSV prefixes: {string.Join(", ", refMapping.Cell1LoadOrderPrefixes)}");
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Cell2 CSV prefixes: {string.Join(", ", refMapping.Cell2LoadOrderPrefixes)}");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Bards Cell1 CSV prefixes: {string.Join(", ", bardsRefMapping.Cell1LoadOrderPrefixes)}");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Bards Cell2 CSV prefixes: {string.Join(", ", bardsRefMapping.Cell2LoadOrderPrefixes)}");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Winking Skeever Cell1 CSV prefixes: {string.Join(", ", winkingRefMapping.Cell1LoadOrderPrefixes)}");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Winking Skeever Cell2 CSV prefixes: {string.Join(", ", winkingRefMapping.Cell2LoadOrderPrefixes)}");
         }
 
-        if (refMapping.Cell1LoadOrderPrefixes.Any(prefix => !string.Equals(prefix, "00", StringComparison.Ordinal)))
+        if (bardsRefMapping.Cell1LoadOrderPrefixes.Any(prefix => !string.Equals(prefix, "00", StringComparison.Ordinal)))
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Warning: Cell1 mapping contains non-00 load-order prefixes.");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Warning: Bards Cell1 mapping contains non-00 load-order prefixes.");
+        }
+
+        if (winkingRefMapping.Cell1LoadOrderPrefixes.Any(prefix => !string.Equals(prefix, "00", StringComparison.Ordinal)))
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Warning: Winking Skeever Cell1 mapping contains non-00 load-order prefixes.");
         }
 
         var intentionallyModifiedFormKeys = new HashSet<FormKey>();
 
-        MoveNewReferencesToBceCell(state, settings, refMapping, intentionallyModifiedFormKeys);
-        SyncMappedReferencesToBce(state, settings, refMapping, intentionallyModifiedFormKeys);
-        SwapCellAndReferencePointers(state, settings, refMapping, intentionallyModifiedFormKeys);
+        MoveNewReferencesToBceCell(state, settings, bardsRefMapping, intentionallyModifiedFormKeys);
+        SyncMappedReferencesToBce(state, settings, bardsRefMapping, intentionallyModifiedFormKeys);
+        SwapCellAndReferencePointers(state, settings, bardsRefMapping, intentionallyModifiedFormKeys);
+
+        CopyNewReferencesToBceWinkingCell(state, settings, winkingRefMapping, intentionallyModifiedFormKeys);
+        SyncWinkingMappedReferencesToBce(state, settings, winkingRefMapping, intentionallyModifiedFormKeys);
+
         CleanupUnintentionalPatchRecords(state, intentionallyModifiedFormKeys, settings);
     }
 
@@ -118,20 +141,58 @@ public static class Program
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys)
     {
+        TransferNewReferencesToBceCell(
+            state,
+            settings,
+            refMapping,
+            intentionallyModifiedFormKeys,
+            VanillaBardsCollegeCell,
+            BceBardsCollegeCell,
+            removeFromVanillaCell: true,
+            locationName: "Bards College");
+    }
+
+    private static void CopyNewReferencesToBceWinkingCell(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        RefMapping refMapping,
+        HashSet<FormKey> intentionallyModifiedFormKeys)
+    {
+        TransferNewReferencesToBceCell(
+            state,
+            settings,
+            refMapping,
+            intentionallyModifiedFormKeys,
+            VanillaWinkingSkeeverCell,
+            BceWinkingSkeeverCell,
+            removeFromVanillaCell: false,
+            locationName: "Winking Skeever");
+    }
+
+    private static void TransferNewReferencesToBceCell(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        RefMapping refMapping,
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        FormKey vanillaCell,
+        FormKey bceCell,
+        bool removeFromVanillaCell,
+        string locationName)
+    {
         var winningCells = state.LoadOrder.PriorityOrder
             .Cell()
             .WinningContextOverrides(state.LinkCache)
             .ToDictionary(x => x.Record.FormKey, x => x);
 
-        if (!winningCells.TryGetValue(VanillaBardsCollegeCell, out var vanillaCellContext))
+        if (!winningCells.TryGetValue(vanillaCell, out var vanillaCellContext))
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Could not resolve vanilla cell {VanillaBardsCollegeCell}.");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Could not resolve vanilla cell {vanillaCell} for {locationName}.");
             return;
         }
 
-        if (!winningCells.TryGetValue(BceBardsCollegeCell, out var bceCellContext))
+        if (!winningCells.TryGetValue(bceCell, out var bceCellContext))
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Could not resolve BCE cell {BceBardsCollegeCell}.");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Could not resolve BCE cell {bceCell} for {locationName}.");
             return;
         }
 
@@ -200,7 +261,8 @@ public static class Program
 
         if (candidates.Count == 0)
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2: no new references to move.");
+            var action = removeFromVanillaCell ? "move" : "copy";
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2 ({locationName}): no new references to {action}.");
             return;
         }
 
@@ -213,8 +275,12 @@ public static class Program
             var shouldBePersistent = winningPersistentRefs.Contains(placed.FormKey) || !winningTemporaryRefs.Contains(placed.FormKey);
             var copied = ClonePlaced(placed);
 
-            RemovePlacedByFormKey(vanillaCellOverride.Persistent, placed.FormKey);
-            RemovePlacedByFormKey(vanillaCellOverride.Temporary, placed.FormKey);
+            if (removeFromVanillaCell)
+            {
+                RemovePlacedByFormKey(vanillaCellOverride.Persistent, placed.FormKey);
+                RemovePlacedByFormKey(vanillaCellOverride.Temporary, placed.FormKey);
+            }
+
             RemovePlacedByFormKey(bceCellOverride.Persistent, placed.FormKey);
             RemovePlacedByFormKey(bceCellOverride.Temporary, placed.FormKey);
 
@@ -233,13 +299,15 @@ public static class Program
             if (settings.Debug)
             {
                 var destination = shouldBePersistent ? "Persistent" : "Temporary";
-                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Moved {placed.FormKey} -> BCE {destination}.");
+                var action = removeFromVanillaCell ? "Moved" : "Copied";
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] {action} {placed.FormKey} -> {locationName} BCE {destination}.");
             }
         }
 
         intentionallyModifiedFormKeys.Add(vanillaCellOverride.FormKey);
         intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
-        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2: moved {movedCount} references to BCE cell.");
+        var verb = removeFromVanillaCell ? "moved" : "copied";
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2 ({locationName}): {verb} {movedCount} references to BCE cell.");
     }
 
     private static bool IsRoomMarkerPlacedReference(
@@ -351,6 +419,41 @@ public static class Program
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys)
     {
+        SyncMappedReferencesToBceForCell(
+            state,
+            settings,
+            refMapping,
+            intentionallyModifiedFormKeys,
+            VanillaBardsCollegeCell,
+            BceBardsCollegeCell,
+            locationName: "Bards College");
+    }
+
+    private static void SyncWinkingMappedReferencesToBce(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        RefMapping refMapping,
+        HashSet<FormKey> intentionallyModifiedFormKeys)
+    {
+        SyncMappedReferencesToBceForCell(
+            state,
+            settings,
+            refMapping,
+            intentionallyModifiedFormKeys,
+            VanillaWinkingSkeeverCell,
+            BceWinkingSkeeverCell,
+            locationName: "Winking Skeever");
+    }
+
+    private static void SyncMappedReferencesToBceForCell(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        RefMapping refMapping,
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        FormKey vanillaCell,
+        FormKey bceCell,
+        string locationName)
+    {
         var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
         var loadOrderIndex = state.LoadOrder.ListedOrder
             .Select((listing, index) => (listing.ModKey, index))
@@ -432,9 +535,9 @@ public static class Program
             }
         }
 
-        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: evaluated {evaluated} mapped refs, synced {changed}.");
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 ({locationName}): evaluated {evaluated} mapped refs, synced {changed}.");
 
-        SyncBardsCollegeCellChanges(state, settings, intentionallyModifiedFormKeys);
+        SyncCellChanges(state, settings, intentionallyModifiedFormKeys, vanillaCell, bceCell, locationName);
     }
 
     private static void SyncBardsCollegeCellChanges(
@@ -442,12 +545,23 @@ public static class Program
         Settings settings,
         HashSet<FormKey> intentionallyModifiedFormKeys)
     {
+        SyncCellChanges(state, settings, intentionallyModifiedFormKeys, VanillaBardsCollegeCell, BceBardsCollegeCell, "Bards College");
+    }
+
+    private static void SyncCellChanges(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        FormKey vanillaCell,
+        FormKey bceCell,
+        string locationName)
+    {
         var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
         var loadOrderIndex = state.LoadOrder.ListedOrder
             .Select((listing, index) => (listing.ModKey, index))
             .ToDictionary(x => x.ModKey, x => x.index);
 
-        var vanillaCellLink = VanillaBardsCollegeCell.ToLink<ICellGetter>();
+        var vanillaCellLink = vanillaCell.ToLink<ICellGetter>();
         var allVanillaCellContexts = vanillaCellLink
             .ResolveAllSimpleContexts<ICellGetter>(state.LinkCache)
             .Select(x => (Typed: x, Untyped: (IModContext)x))
@@ -456,14 +570,14 @@ public static class Program
 
         if (allVanillaCellContexts.Count == 0)
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: no contexts found for {VanillaBardsCollegeCell}.");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): no contexts found for {vanillaCell}.");
             return;
         }
 
-        var sourceContext = allVanillaCellContexts.FirstOrDefault(x => x.Untyped.ModKey == VanillaBardsCollegeCell.ModKey);
+        var sourceContext = allVanillaCellContexts.FirstOrDefault(x => x.Untyped.ModKey == vanillaCell.ModKey);
         if (sourceContext.Typed is null)
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: source context missing for {VanillaBardsCollegeCell}.");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): source context missing for {vanillaCell}.");
             return;
         }
 
@@ -474,7 +588,7 @@ public static class Program
 
         if (winningContext.Typed is null)
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: winning context missing for {VanillaBardsCollegeCell}.");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): winning context missing for {vanillaCell}.");
             return;
         }
 
@@ -483,16 +597,16 @@ public static class Program
         {
             if (settings.Debug)
             {
-                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: skipped (winning mod {winningModKey.FileName} is excluded).");
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): skipped (winning mod {winningModKey.FileName} is excluded).");
             }
 
             return;
         }
 
-        var bceCellLink = BceBardsCollegeCell.ToLink<ICellGetter>();
+        var bceCellLink = bceCell.ToLink<ICellGetter>();
         if (!bceCellLink.TryResolveContext<ISkyrimMod, ISkyrimModGetter, ICell, ICellGetter>(state.LinkCache, out var bceCellContext))
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: could not resolve BCE cell {BceBardsCollegeCell}.");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): could not resolve BCE cell {bceCell}.");
             return;
         }
 
@@ -500,12 +614,12 @@ public static class Program
         var changedAny = ApplyChangedCellProperties(sourceContext.Typed.Record, winningContext.Typed.Record, bceCellOverride, settings);
         if (!changedAny)
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: no cell-level changes to mirror.");
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): no cell-level changes to mirror.");
             return;
         }
 
         intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
-        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync: mirrored cell-level changes from {winningModKey.FileName} to BCE cell.");
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): mirrored cell-level changes from {winningModKey.FileName} to BCE cell.");
     }
 
     private static bool ApplyChangedCellProperties(
