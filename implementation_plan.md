@@ -27,6 +27,7 @@ A Synthesis patcher that reconciles third-party plugin changes with the Bards Co
 | **2** | Move new cell references into BCE cell | New refs appear in BCE cell in xEdit; removed from vanilla cell |
 | **3** | Sync changes on matching references | Modified props on Cell1 ref → same props on Cell2 ref |
 | **4** | Swap cell/ref references in other plugins | Conditions, packages etc. now point to BCE equivalents |
+| **5** | Remap NavigationDoorLinks to BCE navmeshes | Doors link to new BCE navmesh triangles correctly |
 
 Each phase produces a working patcher you can run and inspect in xEdit before moving on.
 
@@ -201,3 +202,22 @@ After each phase, run the patcher against your Skyrim load order via Synthesis, 
 
 > [!TIP]
 > For Phase 2 and 3 testing, I recommend having at least one small test mod that adds a reference to the vanilla bards college cell and one that modifies an existing reference. If you don't have one, I can create a dummy test plugin.
+
+---
+
+### Phase 5 — Remap NavigationDoorLinks to BCE Navmeshes
+
+**Logic:**
+1. Build navmesh centroid maps for both the vanilla cell and the BCE cell.
+2. Match vanilla navmeshes to BCE navmeshes based on the closest distance between their centroids.
+3. Iterate all placed doors that have been patched/moved.
+4. If a door has a `NavigationDoorLink` pointing to a vanilla navmesh, remap it to the matched BCE navmesh.
+
+## Navmesh Centroid Matching Approach
+
+To identify which vanilla navmesh matches which BCE navmesh without a hardcoded CSV, we use the following programmatic approach:
+
+1.  **Centroid Calculation**: For every `NAVM` record in the cell, we compute its **centroid** by averaging the X, Y, and Z coordinates of all vertices in its vertex list (`Data.Vertices`).
+2.  **Distance Matching**: For each navmesh in the vanilla cell, we find the navmesh in the BCE cell with the smallest Euclidean distance between their centroids.
+3.  **Validation**: Since BCE preserves the original Bards College geometry (it is an expansion, not a redesign), the centroids of corresponding navmeshes should be nearly identical (distance close to 0).
+4.  **Remapping**: Once the pairs are matched, any door's `NavigationDoorLink` that points to a vanilla navmesh is updated to reference the corresponding matched BCE navmesh.

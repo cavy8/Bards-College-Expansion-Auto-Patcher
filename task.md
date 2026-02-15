@@ -31,7 +31,14 @@
 - [x] Scan for references to Cell1 placed refs and swap to Cell2
 - [ ] Verify
 
-## Phase 5: Cleanup & Polish
+## Phase 5: NavigationDoorLink Remapping
+- [ ] Build navmesh centroid maps for vanilla and BCE cells
+- [ ] Match navmeshes by closest centroid
+- [ ] Find all placed doors with NavigationDoorLinks referencing vanilla navmeshes
+- [ ] Remap NavigationDoorLink.NavMesh to BCE equivalent
+- [ ] Verify
+
+## Phase 6: Cleanup & Polish
 - [ ] Final testing
 - [ ] README with credits
 - [ ] Walkthrough artifact
