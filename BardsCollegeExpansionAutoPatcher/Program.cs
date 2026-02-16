@@ -19,6 +19,7 @@ public static class Program
     private static readonly FormKey BceWinkingSkeeverCell = new(BceModKey, 0x01F0F7);
     private static readonly FormKey DebugVanillaDoor0006AE55 = new(ModKey.FromNameAndExtension("Skyrim.esm"), 0x06AE55);
     private static readonly FormKey DebugBceDoor0501F42F = new(BceModKey, 0x01F42F);
+    private static readonly FormKey DebugBceExteriorDoor020FFE = new(BceModKey, 0x020FFE);
     private static readonly HashSet<ModKey> VanillaMasterModKeys =
     [
         ModKey.FromNameAndExtension("Skyrim.esm"),
@@ -796,17 +797,42 @@ public static class Program
         HashSet<FormKey> intentionallyModifiedFormKeys,
         Settings settings)
     {
-        var allPatchRecordKeys = state.PatchMod
+        var patchRecordsByKey = state.PatchMod
             .EnumerateMajorRecords()
-            .Select(record => record.FormKey)
-            .ToHashSet();
+            .ToDictionary(record => record.FormKey, record => record);
+
+        if (settings.Debug)
+        {
+            var hasDebugBceExteriorBeforeCleanup = patchRecordsByKey.ContainsKey(DebugBceExteriorDoor020FFE);
+            var debugBceExteriorIsIntentional = intentionallyModifiedFormKeys.Contains(DebugBceExteriorDoor020FFE);
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Cleanup debug: {DebugBceExteriorDoor020FFE} presentBefore={hasDebugBceExteriorBeforeCleanup} intentional={debugBceExteriorIsIntentional}.");
+        }
+
+        var allPatchRecordKeys = patchRecordsByKey.Keys.ToHashSet();
 
         var totalBeforeCleanup = allPatchRecordKeys.Count;
         allPatchRecordKeys.ExceptWith(intentionallyModifiedFormKeys);
-        var removedCount = allPatchRecordKeys.Count;
+        var removableKeys = allPatchRecordKeys
+            .Where(formKey =>
+                patchRecordsByKey.TryGetValue(formKey, out var record)
+                && record is not ICellGetter
+                && record is not IWorldspaceGetter)
+            .ToHashSet();
+
+        var removedCount = removableKeys.Count;
         if (removedCount > 0)
         {
-            state.PatchMod.Remove(allPatchRecordKeys);
+            state.PatchMod.Remove(removableKeys);
+        }
+
+        if (settings.Debug)
+        {
+            var hasDebugBceExteriorAfterCleanup = state.PatchMod
+                .EnumerateMajorRecords()
+                .Any(record => record.FormKey == DebugBceExteriorDoor020FFE);
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Cleanup debug: {DebugBceExteriorDoor020FFE} presentAfter={hasDebugBceExteriorAfterCleanup}.");
         }
 
         var keptCount = totalBeforeCleanup - removedCount;
@@ -1008,10 +1034,23 @@ public static class Program
             movedDoor.TeleportDestination.Door.SetTo(bceExteriorDoorFormKey);
             bceExteriorDoorOverride.TeleportDestination.Door.SetTo(movedDoor.FormKey);
 
+            var bceExteriorDoorActualTarget = bceExteriorDoorOverride.TeleportDestination.Door.FormKey;
+            if (bceExteriorDoorActualTarget != movedDoor.FormKey)
+            {
+                IncrementSkip(skippedByReason, "bce_exterior_rewire_not_applied");
+                if (isDebugPair)
+                {
+                    Console.WriteLine(
+                        $"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F: abort bce_exterior_rewire_not_applied expected={movedDoor.FormKey} actual={bceExteriorDoorActualTarget}.");
+                }
+
+                continue;
+            }
+
             if (isDebugPair)
             {
                 Console.WriteLine(
-                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F (patched): bceInterior={bceInteriorDoor.FormKey} bucket={GetCellBucketLabel(bceCellOverride, bceInteriorDoor.FormKey)} navDoorLink={bceInteriorDoor.NavigationDoorLink is not null} locationRefType={HasNonNullProperty(bceInteriorDoor, "LocationRefType")} disabledBefore={disabledBefore} disableApplied={disableApplied} disabledAfter={disabledAfter}; bceExterior={bceExteriorDoorOverride.FormKey}.");
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F (patched): bceInterior={bceInteriorDoor.FormKey} bucket={GetCellBucketLabel(bceCellOverride, bceInteriorDoor.FormKey)} navDoorLink={bceInteriorDoor.NavigationDoorLink is not null} locationRefType={HasNonNullProperty(bceInteriorDoor, "LocationRefType")} disabledBefore={disabledBefore} disableApplied={disableApplied} disabledAfter={disabledAfter}; bceExterior={bceExteriorDoorOverride.FormKey} bceExteriorTarget={bceExteriorDoorActualTarget} expected={movedDoor.FormKey}.");
             }
 
             patchedCandidates++;
