@@ -17,6 +17,8 @@ public static class Program
     private static readonly FormKey BceBardsCollegeCell = new(BceModKey, 0x01F0F8);
     private static readonly FormKey VanillaWinkingSkeeverCell = new(ModKey.FromNameAndExtension("Skyrim.esm"), 0x016A0E);
     private static readonly FormKey BceWinkingSkeeverCell = new(BceModKey, 0x01F0F7);
+    private static readonly FormKey DebugVanillaDoor0006AE55 = new(ModKey.FromNameAndExtension("Skyrim.esm"), 0x06AE55);
+    private static readonly FormKey DebugBceDoor0501F42F = new(BceModKey, 0x01F42F);
     private static readonly HashSet<ModKey> VanillaMasterModKeys =
     [
         ModKey.FromNameAndExtension("Skyrim.esm"),
@@ -900,21 +902,55 @@ public static class Program
                     $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Door replacement: candidate {movedDoor.FormKey} matched vanilla {selectedPair.VanillaInteriorDoor} / BCE {selectedPair.BceInteriorDoor} via exterior {targetVanillaExteriorDoor}.");
             }
 
+            var isDebugPair = settings.Debug && IsDebugDoorPair(selectedPair.VanillaInteriorDoor, selectedPair.BceInteriorDoor);
+            if (isDebugPair)
+            {
+                Console.WriteLine(
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F (selected): movedDoor={movedDoor.FormKey} movedBucket={GetCellBucketLabel(bceCellOverride, movedDoor.FormKey)} movedNavDoorLink={movedDoor.NavigationDoorLink is not null} movedLocationRefType={HasNonNullProperty(movedDoor, "LocationRefType")}.");
+            }
+
+            if (!TryGetSourcePlacedObjectRecord(state, selectedPair.BceInteriorDoor, selectedPair.BceInteriorDoor.ModKey, out var bceInteriorDoorSource))
+            {
+                IncrementSkip(skippedByReason, "bce_interior_source_unresolvable");
+                if (isDebugPair)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F: abort bce_interior_source_unresolvable.");
+                }
+
+                continue;
+            }
+
             if (!TryGetPatchedPlacedObjectByFormKey(bceCellOverride, selectedPair.BceInteriorDoor, out var bceInteriorDoor))
             {
                 IncrementSkip(skippedByReason, "bce_interior_door_not_found_in_bce_cell");
+                if (isDebugPair)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F: abort bce_interior_door_not_found_in_bce_cell.");
+                }
+
                 continue;
             }
 
             if (!IsPlacedDoor(state, bceInteriorDoor))
             {
                 IncrementSkip(skippedByReason, "bce_interior_ref_not_door");
+                if (isDebugPair)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F: abort bce_interior_ref_not_door base={bceInteriorDoor.Base.FormKey}.");
+                }
+
                 continue;
             }
 
-            if (!TryGetTeleportDoorTarget(bceInteriorDoor, out var bceExteriorDoorFormKey))
+            // Use the BCE master/source link target to avoid phase-3-mutated targets in the working override.
+            if (!TryGetTeleportDoorTarget(bceInteriorDoorSource, out var bceExteriorDoorFormKey))
             {
                 IncrementSkip(skippedByReason, "bce_interior_missing_exterior_target");
+                if (isDebugPair)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F: abort bce_interior_missing_exterior_target.");
+                }
+
                 continue;
             }
 
@@ -923,6 +959,11 @@ public static class Program
                     .TryResolveContext<ISkyrimMod, ISkyrimModGetter, IPlacedObject, IPlacedObjectGetter>(state.LinkCache, out var bceExteriorContext))
             {
                 IncrementSkip(skippedByReason, "bce_exterior_door_unresolvable");
+                if (isDebugPair)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F: abort bce_exterior_door_unresolvable target={bceExteriorDoorFormKey}.");
+                }
+
                 continue;
             }
 
@@ -930,25 +971,48 @@ public static class Program
             if (!IsPlacedDoor(state, bceExteriorDoorOverride))
             {
                 IncrementSkip(skippedByReason, "bce_exterior_ref_not_door");
+                if (isDebugPair)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F: abort bce_exterior_ref_not_door base={bceExteriorDoorOverride.Base.FormKey}.");
+                }
+
                 continue;
             }
 
             if (movedDoor.TeleportDestination is null)
             {
                 IncrementSkip(skippedByReason, "moved_door_missing_teleport_destination_object");
+                if (isDebugPair)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F: abort moved_door_missing_teleport_destination_object.");
+                }
+
                 continue;
             }
 
             if (bceExteriorDoorOverride.TeleportDestination is null)
             {
                 IncrementSkip(skippedByReason, "bce_exterior_missing_teleport_destination_object");
+                if (isDebugPair)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F: abort bce_exterior_missing_teleport_destination_object.");
+                }
+
                 continue;
             }
 
             // All required records and links resolved, apply atomically.
-            TryDisablePlacedDoorIdempotent(bceInteriorDoor);
+            var disabledBefore = IsPlacedInitiallyDisabled(bceInteriorDoor);
+            var disableApplied = TryDisablePlacedDoorIdempotent(bceInteriorDoor);
+            var disabledAfter = IsPlacedInitiallyDisabled(bceInteriorDoor);
             movedDoor.TeleportDestination.Door.SetTo(bceExteriorDoorFormKey);
             bceExteriorDoorOverride.TeleportDestination.Door.SetTo(movedDoor.FormKey);
+
+            if (isDebugPair)
+            {
+                Console.WriteLine(
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F (patched): bceInterior={bceInteriorDoor.FormKey} bucket={GetCellBucketLabel(bceCellOverride, bceInteriorDoor.FormKey)} navDoorLink={bceInteriorDoor.NavigationDoorLink is not null} locationRefType={HasNonNullProperty(bceInteriorDoor, "LocationRefType")} disabledBefore={disabledBefore} disableApplied={disableApplied} disabledAfter={disabledAfter}; bceExterior={bceExteriorDoorOverride.FormKey}.");
+            }
 
             patchedCandidates++;
             intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
@@ -1006,15 +1070,27 @@ public static class Program
                 continue;
             }
 
-            var vanillaInteriorDisabled = pair.Key
+            var vanillaInteriorDisabled = IsPlacedInitiallyDisabled(vanillaInteriorDoorSource);
+            var vanillaInteriorWinningDisabled = pair.Key
                 .ToLink<IPlacedObjectGetter>()
-                .TryResolve<IPlacedObjectGetter>(state.LinkCache, out var vanillaInteriorWinning)
-                && IsPlacedInitiallyDisabled(vanillaInteriorWinning);
+                .TryResolveContext<ISkyrimMod, ISkyrimModGetter, IPlacedObject, IPlacedObjectGetter>(state.LinkCache, out var vanillaInteriorWinningContext)
+                && IsPlacedInitiallyDisabled(vanillaInteriorWinningContext.Record);
+            var vanillaInteriorWinningMod = vanillaInteriorWinningContext?.ModKey.ToString() ?? "unresolved";
 
             var candidate = new InteriorDoorPair(
                 VanillaInteriorDoor: vanillaInteriorDoorSource.FormKey,
                 BceInteriorDoor: bceInteriorDoorSource.FormKey,
                 VanillaInteriorDisabled: vanillaInteriorDisabled);
+
+            if (settings.Debug && IsDebugDoorPair(candidate.VanillaInteriorDoor, candidate.BceInteriorDoor))
+            {
+                var vanillaHasNavDoorLink = vanillaInteriorDoorSource.NavigationDoorLink is not null;
+                var bceHasNavDoorLink = bceInteriorDoorSource.NavigationDoorLink is not null;
+                var vanillaHasLocationRefType = HasNonNullProperty(vanillaInteriorDoorSource, "LocationRefType");
+                var bceHasLocationRefType = HasNonNullProperty(bceInteriorDoorSource, "LocationRefType");
+                Console.WriteLine(
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] DebugPair 0006AE55/0501F42F (index): vanilla={candidate.VanillaInteriorDoor} disabledSource={vanillaInteriorDisabled} disabledWinning={vanillaInteriorWinningDisabled} winningMod={vanillaInteriorWinningMod} navDoorLink={vanillaHasNavDoorLink} locationRefType={vanillaHasLocationRefType}; bce={candidate.BceInteriorDoor} navDoorLink={bceHasNavDoorLink} locationRefType={bceHasLocationRefType}; exteriorTarget={targetVanillaExteriorDoor}.");
+            }
 
             if (!index.TryGetValue(targetVanillaExteriorDoor, out var list))
             {
@@ -1142,14 +1218,109 @@ public static class Program
                 continue;
             }
 
+            if (value is Enum enumValue)
+            {
+                if (TryHasInitiallyDisabledEnumFlag(enumValue))
+                {
+                    return true;
+                }
+            }
+
             var text = value.ToString();
-            if (!string.IsNullOrWhiteSpace(text) && text.Contains("InitiallyDisabled", StringComparison.Ordinal))
+            if (IsInitiallyDisabledFlagName(text))
             {
                 return true;
             }
         }
 
         return false;
+    }
+
+    private static bool TryHasInitiallyDisabledEnumFlag(Enum enumValue)
+    {
+        var enumText = enumValue.ToString();
+        if (IsInitiallyDisabledFlagName(enumText))
+        {
+            return true;
+        }
+
+        try
+        {
+            var enumType = enumValue.GetType();
+            var rawValue = Convert.ToUInt64(enumValue, CultureInfo.InvariantCulture);
+            if (rawValue == 0)
+            {
+                return false;
+            }
+
+            foreach (var candidate in Enum.GetValues(enumType))
+            {
+                if (candidate is not Enum candidateEnum)
+                {
+                    continue;
+                }
+
+                var candidateName = Enum.GetName(enumType, candidate);
+                if (!IsInitiallyDisabledFlagName(candidateName))
+                {
+                    continue;
+                }
+
+                var candidateRaw = Convert.ToUInt64(candidateEnum, CultureInfo.InvariantCulture);
+                if (candidateRaw == 0)
+                {
+                    continue;
+                }
+
+                if ((rawValue & candidateRaw) == candidateRaw)
+                {
+                    return true;
+                }
+            }
+        }
+        catch
+        {
+            // Fallback to string-based detection when raw enum conversion is unavailable.
+        }
+
+        return false;
+    }
+
+    private static bool IsInitiallyDisabledFlagName(string? text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return false;
+        }
+
+        var normalized = string.Concat(text.Where(char.IsLetterOrDigit));
+        return normalized.Contains("InitiallyDisabled", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsDebugDoorPair(FormKey vanillaDoor, FormKey bceDoor)
+    {
+        return vanillaDoor == DebugVanillaDoor0006AE55 && bceDoor == DebugBceDoor0501F42F;
+    }
+
+    private static string GetCellBucketLabel(ICellGetter cell, FormKey formKey)
+    {
+        if (cell.Persistent.Any(x => x.FormKey == formKey))
+        {
+            return "persistent";
+        }
+
+        if (cell.Temporary.Any(x => x.FormKey == formKey))
+        {
+            return "temporary";
+        }
+
+        return "not-found";
+    }
+
+    private static bool HasNonNullProperty(object target, string propertyName)
+    {
+        var property = target.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
+        return property is not null && property.CanRead && property.GetValue(target) is not null;
     }
 
     private static void RemapBardsCollegeNavigationDoorLinks(
