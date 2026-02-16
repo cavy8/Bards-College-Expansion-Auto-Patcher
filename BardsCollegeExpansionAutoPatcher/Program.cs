@@ -124,10 +124,13 @@ public static class Program
         }
 
         var intentionallyModifiedFormKeys = new HashSet<FormKey>();
+        var movedBardsReferences = new HashSet<FormKey>();
 
-        MoveNewReferencesToBceCell(state, settings, bardsRefMapping, intentionallyModifiedFormKeys);
+        MoveNewReferencesToBceCell(state, settings, bardsRefMapping, intentionallyModifiedFormKeys, movedBardsReferences);
         SyncMappedReferencesToBce(state, settings, bardsRefMapping, intentionallyModifiedFormKeys);
         SwapCellAndReferencePointers(state, settings, bardsRefMapping, intentionallyModifiedFormKeys);
+        RewireMovedReplacementDoorsForBardsCollege(state, settings, intentionallyModifiedFormKeys, bardsRefMapping, movedBardsReferences);
+        RemapBardsCollegeNavigationDoorLinks(state, settings, intentionallyModifiedFormKeys, movedBardsReferences);
 
         CopyNewReferencesToBceWinkingCell(state, settings, winkingRefMapping, intentionallyModifiedFormKeys);
         SyncWinkingMappedReferencesToBce(state, settings, winkingRefMapping, intentionallyModifiedFormKeys);
@@ -139,13 +142,15 @@ public static class Program
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
         RefMapping refMapping,
-        HashSet<FormKey> intentionallyModifiedFormKeys)
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        HashSet<FormKey> movedBardsReferences)
     {
         TransferNewReferencesToBceCell(
             state,
             settings,
             refMapping,
             intentionallyModifiedFormKeys,
+            movedBardsReferences,
             VanillaBardsCollegeCell,
             BceBardsCollegeCell,
             removeFromVanillaCell: true,
@@ -163,6 +168,7 @@ public static class Program
             settings,
             refMapping,
             intentionallyModifiedFormKeys,
+            movedBardsReferences: null,
             VanillaWinkingSkeeverCell,
             BceWinkingSkeeverCell,
             removeFromVanillaCell: false,
@@ -174,6 +180,7 @@ public static class Program
         Settings settings,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys,
+        HashSet<FormKey>? movedBardsReferences,
         FormKey vanillaCell,
         FormKey bceCell,
         bool removeFromVanillaCell,
@@ -295,6 +302,7 @@ public static class Program
 
             movedCount++;
             intentionallyModifiedFormKeys.Add(placed.FormKey);
+            movedBardsReferences?.Add(placed.FormKey);
 
             if (settings.Debug)
             {
@@ -687,6 +695,7 @@ public static class Program
     {
         var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
         var swapMap = BuildSwapMap(refMapping);
+        var bceCellOverride = GetBceCellOverrideOrNull(state, BceBardsCollegeCell);
 
         var evaluatedRecords = 0;
         var qualifyingRecords = 0;
@@ -719,6 +728,24 @@ public static class Program
             }
 
             qualifyingRecords++;
+
+            if (bceCellOverride is not null
+                && TryGetPatchedPlacedByFormKey(bceCellOverride, context.Record.FormKey, out var patchedPlaced)
+                && patchedPlaced is IFormLinkContainer patchedPlacedWithLinks)
+            {
+                patchedPlacedWithLinks.RemapLinks(swapMap);
+                swappedRecords++;
+                swappedLinks += matchedLinksInRecord;
+                intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
+                intentionallyModifiedFormKeys.Add(patchedPlaced.FormKey);
+
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: merged remap into BCE cell record {patchedPlaced.FormKey}.");
+                }
+
+                continue;
+            }
 
             var overrideRecord = context.GetOrAddAsOverride(state.PatchMod);
             if (overrideRecord is not IFormLinkContainer mutableRecord)
@@ -782,6 +809,569 @@ public static class Program
 
         var keptCount = totalBeforeCleanup - removedCount;
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Cleanup: kept {keptCount} intentional records, removed {removedCount} non-intentional records.");
+    }
+
+    private sealed record InteriorDoorPair(
+        FormKey VanillaInteriorDoor,
+        FormKey BceInteriorDoor,
+        bool VanillaInteriorDisabled);
+
+    private static void RewireMovedReplacementDoorsForBardsCollege(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        RefMapping bardsRefMapping,
+        HashSet<FormKey> movedBardsReferences)
+    {
+        var bceCellOverride = GetBceCellOverrideOrNull(state, BceBardsCollegeCell);
+        if (bceCellOverride is null)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Door replacement (Bards College): skipped (BCE cell override unavailable).");
+            return;
+        }
+
+        var pairIndex = BuildInteriorDoorPairIndexByExteriorTarget(state, settings, bardsRefMapping);
+        if (pairIndex.Count == 0)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Door replacement (Bards College): no mapped interior door pairs with exterior targets.");
+            return;
+        }
+
+        var evaluatedCandidates = 0;
+        var matchedCandidates = 0;
+        var patchedCandidates = 0;
+        var skippedByReason = new Dictionary<string, int>(StringComparer.Ordinal);
+
+        static void IncrementSkip(Dictionary<string, int> counters, string reason)
+        {
+            if (!counters.TryAdd(reason, 1))
+            {
+                counters[reason]++;
+            }
+        }
+
+        foreach (var movedFormKey in movedBardsReferences)
+        {
+            if (!TryGetPatchedPlacedObjectByFormKey(bceCellOverride, movedFormKey, out var movedDoor))
+            {
+                IncrementSkip(skippedByReason, "moved_ref_not_in_bce_cell");
+                continue;
+            }
+
+            if (!IsPlacedDoor(state, movedDoor))
+            {
+                IncrementSkip(skippedByReason, "moved_ref_not_door");
+                continue;
+            }
+
+            evaluatedCandidates++;
+            if (!TryGetTeleportDoorTarget(movedDoor, out var targetVanillaExteriorDoor))
+            {
+                IncrementSkip(skippedByReason, "moved_door_missing_teleport_target");
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Door replacement: skipped {movedDoor.FormKey} (no teleport door target).");
+                }
+
+                continue;
+            }
+
+            if (!pairIndex.TryGetValue(targetVanillaExteriorDoor, out var pairsForExterior))
+            {
+                IncrementSkip(skippedByReason, "no_mapped_pair_for_exterior_target");
+                continue;
+            }
+
+            if (!TryResolveReplacementPair(pairsForExterior, out var selectedPair, out var pairSkipReason))
+            {
+                IncrementSkip(skippedByReason, pairSkipReason);
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Door replacement: skipped {movedDoor.FormKey} ({pairSkipReason}).");
+                }
+
+                continue;
+            }
+
+            matchedCandidates++;
+            if (settings.Debug)
+            {
+                Console.WriteLine(
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Door replacement: candidate {movedDoor.FormKey} matched vanilla {selectedPair.VanillaInteriorDoor} / BCE {selectedPair.BceInteriorDoor} via exterior {targetVanillaExteriorDoor}.");
+            }
+
+            if (!TryGetPatchedPlacedObjectByFormKey(bceCellOverride, selectedPair.BceInteriorDoor, out var bceInteriorDoor))
+            {
+                IncrementSkip(skippedByReason, "bce_interior_door_not_found_in_bce_cell");
+                continue;
+            }
+
+            if (!IsPlacedDoor(state, bceInteriorDoor))
+            {
+                IncrementSkip(skippedByReason, "bce_interior_ref_not_door");
+                continue;
+            }
+
+            if (!TryGetTeleportDoorTarget(bceInteriorDoor, out var bceExteriorDoorFormKey))
+            {
+                IncrementSkip(skippedByReason, "bce_interior_missing_exterior_target");
+                continue;
+            }
+
+            if (!bceExteriorDoorFormKey
+                    .ToLink<IPlacedObjectGetter>()
+                    .TryResolveContext<ISkyrimMod, ISkyrimModGetter, IPlacedObject, IPlacedObjectGetter>(state.LinkCache, out var bceExteriorContext))
+            {
+                IncrementSkip(skippedByReason, "bce_exterior_door_unresolvable");
+                continue;
+            }
+
+            var bceExteriorDoorOverride = bceExteriorContext.GetOrAddAsOverride(state.PatchMod);
+            if (!IsPlacedDoor(state, bceExteriorDoorOverride))
+            {
+                IncrementSkip(skippedByReason, "bce_exterior_ref_not_door");
+                continue;
+            }
+
+            if (movedDoor.TeleportDestination is null)
+            {
+                IncrementSkip(skippedByReason, "moved_door_missing_teleport_destination_object");
+                continue;
+            }
+
+            if (bceExteriorDoorOverride.TeleportDestination is null)
+            {
+                IncrementSkip(skippedByReason, "bce_exterior_missing_teleport_destination_object");
+                continue;
+            }
+
+            // All required records and links resolved, apply atomically.
+            TryDisablePlacedDoorIdempotent(bceInteriorDoor);
+            movedDoor.TeleportDestination.Door.SetTo(bceExteriorDoorFormKey);
+            bceExteriorDoorOverride.TeleportDestination.Door.SetTo(movedDoor.FormKey);
+
+            patchedCandidates++;
+            intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
+            intentionallyModifiedFormKeys.Add(movedDoor.FormKey);
+            intentionallyModifiedFormKeys.Add(bceInteriorDoor.FormKey);
+            intentionallyModifiedFormKeys.Add(bceExteriorDoorOverride.FormKey);
+
+            if (settings.Debug)
+            {
+                Console.WriteLine(
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Door replacement: patched moved {movedDoor.FormKey}, disabled BCE interior {bceInteriorDoor.FormKey}, rewired BCE exterior {bceExteriorDoorOverride.FormKey}.");
+            }
+        }
+
+        var skipSummary = skippedByReason.Count == 0
+            ? "none"
+            : string.Join(", ", skippedByReason.OrderBy(x => x.Key).Select(x => $"{x.Key}={x.Value}"));
+        Console.WriteLine(
+            $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Door replacement (Bards College): evaluated {evaluatedCandidates}, matched {matchedCandidates}, patched {patchedCandidates}, skipped [{skipSummary}].");
+    }
+
+    private static Dictionary<FormKey, List<InteriorDoorPair>> BuildInteriorDoorPairIndexByExteriorTarget(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        RefMapping bardsRefMapping)
+    {
+        var index = new Dictionary<FormKey, List<InteriorDoorPair>>();
+
+        foreach (var pair in bardsRefMapping.Cell1ToCell2)
+        {
+            if (!TryGetSourcePlacedObjectRecord(state, pair.Key, pair.Key.ModKey, out var vanillaInteriorDoorSource))
+            {
+                continue;
+            }
+
+            if (!TryGetSourcePlacedObjectRecord(state, pair.Value, pair.Value.ModKey, out var bceInteriorDoorSource))
+            {
+                continue;
+            }
+
+            if (!IsPlacedDoor(state, vanillaInteriorDoorSource) || !IsPlacedDoor(state, bceInteriorDoorSource))
+            {
+                continue;
+            }
+
+            // Match against the source vanilla destination so replacement doors that mirror
+            // original vanilla links can still map even if winning overrides changed that record.
+            if (!TryGetTeleportDoorTarget(vanillaInteriorDoorSource, out var targetVanillaExteriorDoor))
+            {
+                continue;
+            }
+
+            if (!TryGetTeleportDoorTarget(bceInteriorDoorSource, out _))
+            {
+                continue;
+            }
+
+            var vanillaInteriorDisabled = pair.Key
+                .ToLink<IPlacedObjectGetter>()
+                .TryResolve<IPlacedObjectGetter>(state.LinkCache, out var vanillaInteriorWinning)
+                && IsPlacedInitiallyDisabled(vanillaInteriorWinning);
+
+            var candidate = new InteriorDoorPair(
+                VanillaInteriorDoor: vanillaInteriorDoorSource.FormKey,
+                BceInteriorDoor: bceInteriorDoorSource.FormKey,
+                VanillaInteriorDisabled: vanillaInteriorDisabled);
+
+            if (!index.TryGetValue(targetVanillaExteriorDoor, out var list))
+            {
+                list = [];
+                index[targetVanillaExteriorDoor] = list;
+            }
+
+            list.Add(candidate);
+        }
+
+        if (settings.Debug)
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Door replacement: indexed {index.Sum(x => x.Value.Count)} mapped interior pairs across {index.Count} exterior targets.");
+        }
+
+        return index;
+    }
+
+    private static bool TryGetSourcePlacedObjectRecord(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        FormKey formKey,
+        ModKey sourceModKey,
+        out IPlacedObjectGetter record)
+    {
+        var sourceContext = formKey
+            .ToLink<IPlacedObjectGetter>()
+            .ResolveAllSimpleContexts<IPlacedObjectGetter>(state.LinkCache)
+            .FirstOrDefault(x => x.ModKey == sourceModKey);
+
+        if (sourceContext is null)
+        {
+            record = null!;
+            return false;
+        }
+
+        record = sourceContext.Record;
+        return true;
+    }
+
+    private static bool TryResolveReplacementPair(
+        IReadOnlyList<InteriorDoorPair> candidates,
+        out InteriorDoorPair selectedPair,
+        out string skipReason)
+    {
+        selectedPair = default!;
+        skipReason = string.Empty;
+
+        if (candidates.Count == 0)
+        {
+            skipReason = "no_candidates_for_exterior_target";
+            return false;
+        }
+
+        if (candidates.Count == 1)
+        {
+            selectedPair = candidates[0];
+            return true;
+        }
+
+        var disabledCandidates = candidates.Where(x => x.VanillaInteriorDisabled).ToList();
+        if (disabledCandidates.Count == 1)
+        {
+            selectedPair = disabledCandidates[0];
+            return true;
+        }
+
+        skipReason = disabledCandidates.Count > 1
+            ? "ambiguous_multiple_disabled_candidates"
+            : "ambiguous_multiple_candidates_no_disabled";
+        return false;
+    }
+
+    private static bool IsPlacedDoor(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        IPlacedObjectGetter placedObject)
+    {
+        var baseFormKey = placedObject.Base.FormKey;
+        return !baseFormKey.IsNull && state.LinkCache.TryResolve<IDoorGetter>(baseFormKey, out _);
+    }
+
+    private static bool TryGetTeleportDoorTarget(IPlacedObjectGetter placedObject, out FormKey doorTarget)
+    {
+        doorTarget = default;
+        var teleportDestination = placedObject.TeleportDestination;
+        if (teleportDestination is null)
+        {
+            return false;
+        }
+
+        var target = teleportDestination.Door.FormKey;
+        if (target.IsNull)
+        {
+            return false;
+        }
+
+        doorTarget = target;
+        return true;
+    }
+
+    private static bool TryDisablePlacedDoorIdempotent(IPlacedObject placedDoor)
+    {
+        if (IsPlacedInitiallyDisabled(placedDoor))
+        {
+            return false;
+        }
+
+        placedDoor.Disable(IPlaced.DisableType.JustInitiallyDisabled);
+        return true;
+    }
+
+    private static bool IsPlacedInitiallyDisabled(object placed)
+    {
+        foreach (var propertyName in new[] { "MajorFlags", "Flags" })
+        {
+            var property = placed.GetType().GetProperty(propertyName, BindingFlags.Public | BindingFlags.Instance);
+            if (property is null || !property.CanRead)
+            {
+                continue;
+            }
+
+            var value = property.GetValue(placed);
+            if (value is null)
+            {
+                continue;
+            }
+
+            var text = value.ToString();
+            if (!string.IsNullOrWhiteSpace(text) && text.Contains("InitiallyDisabled", StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static void RemapBardsCollegeNavigationDoorLinks(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        HashSet<FormKey> movedBardsReferences)
+    {
+        var bceCellOverride = GetBceCellOverrideOrNull(state, BceBardsCollegeCell);
+        if (bceCellOverride is null)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 5 (Bards College): skipped navdoor remap (BCE cell override unavailable).");
+            return;
+        }
+
+        var vanillaNavmeshCentroids = BuildCellNavmeshCentroids(state, VanillaBardsCollegeCell);
+        var bceNavmeshCentroids = BuildCellNavmeshCentroids(state, BceBardsCollegeCell);
+
+        if (vanillaNavmeshCentroids.Count == 0 || bceNavmeshCentroids.Count == 0)
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 5 (Bards College): skipped navdoor remap (vanilla navmeshes: {vanillaNavmeshCentroids.Count}, BCE navmeshes: {bceNavmeshCentroids.Count}).");
+            return;
+        }
+
+        var navmeshSwapMap = MatchNavmeshesByClosestCentroid(vanillaNavmeshCentroids, bceNavmeshCentroids);
+        if (navmeshSwapMap.Count == 0)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 5 (Bards College): no navmesh centroid matches found.");
+            return;
+        }
+
+        var evaluatedDoors = 0;
+        var remappedDoors = 0;
+        foreach (var movedFormKey in movedBardsReferences)
+        {
+            if (!TryGetPatchedPlacedObjectByFormKey(bceCellOverride, movedFormKey, out var patchedDoor))
+            {
+                continue;
+            }
+
+            if (!state.LinkCache.TryResolve<IDoorGetter>(patchedDoor.Base.FormKey, out _))
+            {
+                continue;
+            }
+
+            var doorLink = patchedDoor.NavigationDoorLink;
+            if (doorLink is null)
+            {
+                continue;
+            }
+
+            evaluatedDoors++;
+            var linkedNavmesh = doorLink.NavMesh.FormKey;
+            if (!navmeshSwapMap.TryGetValue(linkedNavmesh, out var targetNavmesh))
+            {
+                continue;
+            }
+
+            doorLink.NavMesh.SetTo(targetNavmesh);
+            remappedDoors++;
+            intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
+            intentionallyModifiedFormKeys.Add(patchedDoor.FormKey);
+
+            if (settings.Debug)
+            {
+                Console.WriteLine(
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 5 (Bards College): remapped moved door {patchedDoor.FormKey} navdoor {linkedNavmesh} -> {targetNavmesh}.");
+            }
+        }
+
+        Console.WriteLine(
+            $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 5 (Bards College): matched {navmeshSwapMap.Count} navmeshes, evaluated {evaluatedDoors} moved-door links, remapped {remappedDoors}.");
+    }
+
+    private static Dictionary<FormKey, (double X, double Y, double Z)> BuildCellNavmeshCentroids(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        FormKey cellFormKey)
+    {
+        var result = new Dictionary<FormKey, (double X, double Y, double Z)>();
+
+        foreach (var navmeshContext in state.LoadOrder.PriorityOrder
+                     .WinningContextOverrides<ISkyrimMod, ISkyrimModGetter, INavigationMesh, INavigationMeshGetter>(state.LinkCache))
+        {
+            var parent = navmeshContext.Record.Data?.Parent;
+            if (parent is not ICellNavmeshParentGetter cellParent)
+            {
+                continue;
+            }
+
+            if (cellParent.Parent.FormKey != cellFormKey)
+            {
+                continue;
+            }
+
+            var centroid = TryComputeNavmeshCentroid(navmeshContext.Record);
+            if (centroid is null)
+            {
+                continue;
+            }
+
+            result[navmeshContext.Record.FormKey] = centroid.Value;
+        }
+
+        return result;
+    }
+
+    private static (double X, double Y, double Z)? TryComputeNavmeshCentroid(INavigationMeshGetter navmesh)
+    {
+        var vertices = navmesh.Data?.Vertices;
+        if (vertices is null || vertices.Count == 0)
+        {
+            return null;
+        }
+
+        double x = 0;
+        double y = 0;
+        double z = 0;
+        foreach (var vertex in vertices)
+        {
+            x += vertex.X;
+            y += vertex.Y;
+            z += vertex.Z;
+        }
+
+        var count = vertices.Count;
+        return (x / count, y / count, z / count);
+    }
+
+    private static Dictionary<FormKey, FormKey> MatchNavmeshesByClosestCentroid(
+        Dictionary<FormKey, (double X, double Y, double Z)> vanillaNavmeshCentroids,
+        Dictionary<FormKey, (double X, double Y, double Z)> bceNavmeshCentroids)
+    {
+        var candidatePairs = new List<(FormKey Vanilla, FormKey Bce, double DistanceSquared)>();
+        foreach (var vanilla in vanillaNavmeshCentroids)
+        {
+            foreach (var bce in bceNavmeshCentroids)
+            {
+                candidatePairs.Add((vanilla.Key, bce.Key, DistanceSquared(vanilla.Value, bce.Value)));
+            }
+        }
+
+        var matchedVanilla = new HashSet<FormKey>();
+        var matchedBce = new HashSet<FormKey>();
+        var map = new Dictionary<FormKey, FormKey>();
+
+        foreach (var pair in candidatePairs.OrderBy(x => x.DistanceSquared))
+        {
+            if (!matchedVanilla.Add(pair.Vanilla))
+            {
+                continue;
+            }
+
+            if (!matchedBce.Add(pair.Bce))
+            {
+                continue;
+            }
+
+            map[pair.Vanilla] = pair.Bce;
+        }
+
+        return map;
+    }
+
+    private static double DistanceSquared((double X, double Y, double Z) left, (double X, double Y, double Z) right)
+    {
+        var dx = left.X - right.X;
+        var dy = left.Y - right.Y;
+        var dz = left.Z - right.Z;
+        return dx * dx + dy * dy + dz * dz;
+    }
+
+    private static ICell? GetBceCellOverrideOrNull(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        FormKey bceCellFormKey)
+    {
+        var bceCellContext = state.LoadOrder.PriorityOrder
+            .Cell()
+            .WinningContextOverrides(state.LinkCache)
+            .FirstOrDefault(x => x.Record.FormKey == bceCellFormKey);
+
+        return bceCellContext?.GetOrAddAsOverride(state.PatchMod);
+    }
+
+    private static bool TryGetPatchedPlacedByFormKey(ICell cell, FormKey formKey, out IPlaced placed)
+    {
+        foreach (var entry in cell.Persistent)
+        {
+            if (entry.FormKey != formKey)
+            {
+                continue;
+            }
+
+            placed = entry;
+            return true;
+        }
+
+        foreach (var entry in cell.Temporary)
+        {
+            if (entry.FormKey != formKey)
+            {
+                continue;
+            }
+
+            placed = entry;
+            return true;
+        }
+
+        placed = null!;
+        return false;
+    }
+
+    private static bool TryGetPatchedPlacedObjectByFormKey(ICell cell, FormKey formKey, out IPlacedObject placedObject)
+    {
+        if (TryGetPatchedPlacedByFormKey(cell, formKey, out var placed) && placed is IPlacedObject door)
+        {
+            placedObject = door;
+            return true;
+        }
+
+        placedObject = null!;
+        return false;
     }
 
     private static bool HaveMatchingPlacedKind(object left, object right)

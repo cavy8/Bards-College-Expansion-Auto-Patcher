@@ -32,10 +32,10 @@
 - [ ] Verify
 
 ## Phase 5: NavigationDoorLink Remapping
-- [ ] Build navmesh centroid maps for vanilla and BCE cells
-- [ ] Match navmeshes by closest centroid
-- [ ] Find all placed doors with NavigationDoorLinks referencing vanilla navmeshes
-- [ ] Remap NavigationDoorLink.NavMesh to BCE equivalent
+- [x] Build navmesh centroid maps for vanilla and BCE cells (Bards College)
+- [x] Match navmeshes by closest centroid (Bards College)
+- [x] Find all placed doors with NavigationDoorLinks referencing vanilla navmeshes (Bards College)
+- [x] Remap NavigationDoorLink.NavMesh to BCE equivalent (Bards College)
 - [ ] Verify
 
 ## Phase 6: Cleanup & Polish
