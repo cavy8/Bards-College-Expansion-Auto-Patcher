@@ -1394,6 +1394,10 @@ public static class Program
 
         var evaluatedDoors = 0;
         var remappedDoors = 0;
+        var triangleExistingMatch = 0;
+        var triangleSynthesizedFromNearestNonDoor = 0;
+        var triangleFallbackFromDoorPosition = 0;
+        var triangleSetToNegativeOne = 0;
         foreach (var movedFormKey in movedBardsReferences)
         {
             if (!TryGetPatchedPlacedObjectByFormKey(bceCellOverride, movedFormKey, out var patchedDoor))
@@ -1419,7 +1423,53 @@ public static class Program
                 continue;
             }
 
+            var oldTriangle = doorLink.TeleportMarkerTriangle;
+            var resolvedTriangle = (short)-1;
+            var triangleResolutionSource = "fallback_negative_one";
+
+            if (targetNavmesh
+                .ToLink<INavigationMeshGetter>()
+                .TryResolveContext<ISkyrimMod, ISkyrimModGetter, INavigationMesh, INavigationMeshGetter>(state.LinkCache, out var targetNavmeshContext))
+            {
+                var targetNavmeshOverride = targetNavmeshContext.GetOrAddAsOverride(state.PatchMod);
+                if (TryResolveOrCreateDoorTriangleForDoor(
+                        state,
+                        patchedDoor,
+                        linkedNavmesh,
+                        oldTriangle,
+                        targetNavmeshOverride,
+                        out var synthesizedTriangle,
+                        out triangleResolutionSource))
+                {
+                    resolvedTriangle = synthesizedTriangle;
+
+                    if (string.Equals(triangleResolutionSource, "existing_match", StringComparison.Ordinal))
+                    {
+                        triangleExistingMatch++;
+                    }
+                    else if (string.Equals(triangleResolutionSource, "synthesized_from_nearest_non_door", StringComparison.Ordinal))
+                    {
+                        triangleSynthesizedFromNearestNonDoor++;
+                        intentionallyModifiedFormKeys.Add(targetNavmeshOverride.FormKey);
+                    }
+                    else if (string.Equals(triangleResolutionSource, "fallback_from_door_position", StringComparison.Ordinal))
+                    {
+                        triangleFallbackFromDoorPosition++;
+                        intentionallyModifiedFormKeys.Add(targetNavmeshOverride.FormKey);
+                    }
+                }
+                else
+                {
+                    triangleSetToNegativeOne++;
+                }
+            }
+            else
+            {
+                triangleSetToNegativeOne++;
+            }
+
             doorLink.NavMesh.SetTo(targetNavmesh);
+            doorLink.TeleportMarkerTriangle = resolvedTriangle;
             remappedDoors++;
             intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
             intentionallyModifiedFormKeys.Add(patchedDoor.FormKey);
@@ -1427,12 +1477,12 @@ public static class Program
             if (settings.Debug)
             {
                 Console.WriteLine(
-                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 5 (Bards College): remapped moved door {patchedDoor.FormKey} navdoor {linkedNavmesh} -> {targetNavmesh}.");
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 5 (Bards College): remapped moved door {patchedDoor.FormKey} navdoor {linkedNavmesh} -> {targetNavmesh}; triangle {oldTriangle} -> {resolvedTriangle} ({triangleResolutionSource}).");
             }
         }
 
         Console.WriteLine(
-            $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 5 (Bards College): matched {navmeshSwapMap.Count} navmeshes, evaluated {evaluatedDoors} moved-door links, remapped {remappedDoors}.");
+            $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 5 (Bards College): matched {navmeshSwapMap.Count} navmeshes, evaluated {evaluatedDoors} moved-door links, remapped {remappedDoors}, triangle_existing_match={triangleExistingMatch}, triangle_synthesized_from_nearest_non_door={triangleSynthesizedFromNearestNonDoor}, triangle_fallback_from_door_position={triangleFallbackFromDoorPosition}, triangle_set_to_negative_one={triangleSetToNegativeOne}.");
     }
 
     private static Dictionary<FormKey, (double X, double Y, double Z)> BuildCellNavmeshCentroids(
@@ -1530,6 +1580,260 @@ public static class Program
         var dy = left.Y - right.Y;
         var dz = left.Z - right.Z;
         return dx * dx + dy * dy + dz * dz;
+    }
+
+    private static bool TryResolveOrCreateDoorTriangleForDoor(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        IPlacedObject patchedDoor,
+        FormKey sourceNavmesh,
+        short sourceTriangle,
+        INavigationMesh targetNavmeshOverride,
+        out short triangle,
+        out string resolutionSource)
+    {
+        triangle = -1;
+        resolutionSource = "fallback_negative_one";
+
+        if (TryGetExistingDoorTriangleForDoor(targetNavmeshOverride, patchedDoor.FormKey, out var existingTriangle))
+        {
+            triangle = existingTriangle;
+            resolutionSource = "existing_match";
+            return true;
+        }
+
+        if (TryGetTriangleCentroidFromLink(state, sourceNavmesh, sourceTriangle, out var sourceTriangleCentroid)
+            && TryFindNearestAvailableTriangle(targetNavmeshOverride, sourceTriangleCentroid, out var nearestTriangle))
+        {
+            if (TryAppendDoorTriangle(targetNavmeshOverride, patchedDoor.FormKey, nearestTriangle))
+            {
+                triangle = nearestTriangle;
+                resolutionSource = "synthesized_from_nearest_non_door";
+                return true;
+            }
+        }
+
+        if (TryGetPlacedObjectPosition(patchedDoor, out var doorPosition)
+            && TryFindNearestAvailableTriangle(targetNavmeshOverride, doorPosition, out var fallbackTriangle)
+            && TryAppendDoorTriangle(targetNavmeshOverride, patchedDoor.FormKey, fallbackTriangle))
+        {
+            triangle = fallbackTriangle;
+            resolutionSource = "fallback_from_door_position";
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetExistingDoorTriangleForDoor(INavigationMeshGetter navmesh, FormKey doorFormKey, out short triangle)
+    {
+        triangle = -1;
+        var doorTriangles = navmesh.Data?.DoorTriangles;
+        if (doorTriangles is null || doorTriangles.Count == 0)
+        {
+            return false;
+        }
+
+        foreach (var doorTriangle in doorTriangles)
+        {
+            if (doorTriangle.Door.FormKey != doorFormKey)
+            {
+                continue;
+            }
+
+            triangle = doorTriangle.TriangleBeforeDoor;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryGetTriangleCentroidFromLink(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        FormKey navmeshFormKey,
+        short triangleIndex,
+        out (double X, double Y, double Z) centroid)
+    {
+        centroid = default;
+        if (!state.LinkCache.TryResolve<INavigationMeshGetter>(navmeshFormKey, out var navmesh))
+        {
+            return false;
+        }
+
+        return TryGetTriangleCentroid(navmesh, triangleIndex, out centroid);
+    }
+
+    private static bool TryGetTriangleCentroid(
+        INavigationMeshGetter navmesh,
+        short triangleIndex,
+        out (double X, double Y, double Z) centroid)
+    {
+        centroid = default;
+        var data = navmesh.Data;
+        if (data is null)
+        {
+            return false;
+        }
+
+        if (triangleIndex < 0)
+        {
+            return false;
+        }
+
+        return TryGetTriangleCentroid(data, triangleIndex, out centroid);
+    }
+
+    private static bool TryGetTriangleCentroid(
+        INavigationMeshDataGetter data,
+        int triangleIndex,
+        out (double X, double Y, double Z) centroid)
+    {
+        centroid = default;
+        var vertices = data.Vertices;
+        var triangles = data.Triangles;
+        if (vertices is null || triangles is null)
+        {
+            return false;
+        }
+
+        if (triangleIndex < 0 || triangleIndex >= triangles.Count)
+        {
+            return false;
+        }
+
+        var navTriangle = triangles[triangleIndex];
+        var a = navTriangle.Vertices.X;
+        var b = navTriangle.Vertices.Y;
+        var c = navTriangle.Vertices.Z;
+        if (a < 0 || b < 0 || c < 0 || a >= vertices.Count || b >= vertices.Count || c >= vertices.Count)
+        {
+            return false;
+        }
+
+        var va = vertices[a];
+        var vb = vertices[b];
+        var vc = vertices[c];
+        centroid = (
+            (va.X + vb.X + vc.X) / 3d,
+            (va.Y + vb.Y + vc.Y) / 3d,
+            (va.Z + vb.Z + vc.Z) / 3d);
+        return true;
+    }
+
+    private static bool TryFindNearestAvailableTriangle(
+        INavigationMeshGetter navmesh,
+        (double X, double Y, double Z) referencePoint,
+        out short triangle)
+    {
+        triangle = -1;
+        var data = navmesh.Data;
+        if (data is null)
+        {
+            return false;
+        }
+
+        var triangles = data.Triangles;
+        if (triangles is null || triangles.Count == 0)
+        {
+            return false;
+        }
+
+        var usedDoorTriangles = new HashSet<int>();
+        var doorTriangles = data.DoorTriangles;
+        if (doorTriangles is not null)
+        {
+            foreach (var doorTriangle in doorTriangles)
+            {
+                usedDoorTriangles.Add(doorTriangle.TriangleBeforeDoor);
+            }
+        }
+
+        var found = false;
+        var bestDistance = double.MaxValue;
+        var bestTriangle = -1;
+
+        for (var i = 0; i < triangles.Count; i++)
+        {
+            if (usedDoorTriangles.Contains(i))
+            {
+                continue;
+            }
+
+            if (!TryGetTriangleCentroid(data, i, out var triangleCentroid))
+            {
+                continue;
+            }
+
+            var distance = DistanceSquared(referencePoint, triangleCentroid);
+            if (distance >= bestDistance)
+            {
+                continue;
+            }
+
+            bestDistance = distance;
+            bestTriangle = i;
+            found = true;
+        }
+
+        if (!found || bestTriangle > short.MaxValue)
+        {
+            return false;
+        }
+
+        triangle = (short)bestTriangle;
+        return true;
+    }
+
+    private static bool TryGetMostCommonDoorTriangleUnknown(INavigationMeshGetter navmesh, out int unknown)
+    {
+        unknown = 0;
+        var doorTriangles = navmesh.Data?.DoorTriangles;
+        if (doorTriangles is null || doorTriangles.Count == 0)
+        {
+            return false;
+        }
+
+        unknown = doorTriangles
+            .GroupBy(x => x.Unknown)
+            .OrderByDescending(group => group.Count())
+            .ThenBy(group => group.Key)
+            .First()
+            .Key;
+        return true;
+    }
+
+    private static bool TryAppendDoorTriangle(INavigationMesh navmesh, FormKey doorFormKey, short triangle)
+    {
+        if (navmesh.Data is null)
+        {
+            return false;
+        }
+
+        if (TryGetExistingDoorTriangleForDoor(navmesh, doorFormKey, out _))
+        {
+            return true;
+        }
+
+        TryGetMostCommonDoorTriangleUnknown(navmesh, out var unknown);
+        var doorTriangle = new DoorTriangle
+        {
+            TriangleBeforeDoor = triangle,
+            Unknown = unknown
+        };
+        doorTriangle.Door.SetTo(doorFormKey);
+        navmesh.Data.DoorTriangles.Add(doorTriangle);
+        return true;
+    }
+
+    private static bool TryGetPlacedObjectPosition(IPlacedObjectGetter placedObject, out (double X, double Y, double Z) position)
+    {
+        position = default;
+        var placement = placedObject.Placement;
+        if (placement is null)
+        {
+            return false;
+        }
+
+        return TryReadVector3(placement, "Position", out position);
     }
 
     private static ICell? GetBceCellOverrideOrNull(
