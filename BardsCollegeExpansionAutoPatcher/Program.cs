@@ -2179,6 +2179,12 @@ public static class Program
         }
 
         object? targetObject;
+        if (TryCreateInterfaceFormLinkTarget(targetType, sourceFormKey, out targetObject))
+        {
+            convertedValue = targetObject;
+            return true;
+        }
+
         try
         {
             targetObject = System.Activator.CreateInstance(targetType);
@@ -2203,21 +2209,86 @@ public static class Program
 
         var sourceIsNullProperty = sourceValue.GetType().GetProperty("IsNull", BindingFlags.Public | BindingFlags.Instance);
         var targetIsNullProperty = targetType.GetProperty("IsNull", BindingFlags.Public | BindingFlags.Instance);
-        if (sourceIsNullProperty is not null
-            && targetIsNullProperty is not null
-            && sourceIsNullProperty.CanRead
+        if (targetIsNullProperty is not null
             && targetIsNullProperty.CanWrite
-            && sourceIsNullProperty.PropertyType == typeof(bool)
             && targetIsNullProperty.PropertyType == typeof(bool))
         {
-            var sourceIsNull = sourceIsNullProperty.GetValue(sourceValue);
-            if (sourceIsNull is bool b)
+            var isNull = sourceFormKey.IsNull;
+            if (sourceIsNullProperty is not null
+                && sourceIsNullProperty.CanRead
+                && sourceIsNullProperty.PropertyType == typeof(bool)
+                && sourceIsNullProperty.GetValue(sourceValue) is bool sourceIsNull)
             {
-                targetIsNullProperty.SetValue(targetObject, b);
+                isNull = sourceIsNull;
             }
+
+            targetIsNullProperty.SetValue(targetObject, isNull);
         }
 
         convertedValue = targetObject;
+        return true;
+    }
+
+    private static bool TryCreateInterfaceFormLinkTarget(Type targetType, FormKey sourceFormKey, out object? targetObject)
+    {
+        targetObject = null;
+        if (!targetType.IsInterface || !targetType.IsGenericType)
+        {
+            return false;
+        }
+
+        var genericDefinition = targetType.GetGenericTypeDefinition();
+        var genericArgument = targetType.GetGenericArguments()[0];
+        Type? concreteType = null;
+        object? ctorArg = null;
+        Type? ctorArgType = null;
+
+        if (genericDefinition == typeof(IFormLink<>) || genericDefinition == typeof(IFormLinkGetter<>))
+        {
+            concreteType = typeof(FormLink<>).MakeGenericType(genericArgument);
+            ctorArg = sourceFormKey;
+            ctorArgType = typeof(FormKey);
+        }
+        else if (genericDefinition == typeof(IFormLinkNullable<>) || genericDefinition == typeof(IFormLinkNullableGetter<>))
+        {
+            concreteType = typeof(FormLinkNullable<>).MakeGenericType(genericArgument);
+            ctorArg = sourceFormKey.IsNull ? (FormKey?)null : sourceFormKey;
+            ctorArgType = typeof(FormKey?);
+        }
+
+        if (concreteType is null)
+        {
+            return false;
+        }
+
+        var constructor = concreteType.GetConstructor([ctorArgType!]);
+        if (constructor is not null)
+        {
+            targetObject = constructor.Invoke([ctorArg]);
+            return true;
+        }
+
+        try
+        {
+            targetObject = System.Activator.CreateInstance(concreteType);
+        }
+        catch
+        {
+            return false;
+        }
+
+        if (targetObject is null)
+        {
+            return false;
+        }
+
+        var formKeyProperty = concreteType.GetProperty("FormKey", BindingFlags.Public | BindingFlags.Instance);
+        if (formKeyProperty is null || !formKeyProperty.CanWrite || formKeyProperty.PropertyType != typeof(FormKey))
+        {
+            return false;
+        }
+
+        formKeyProperty.SetValue(targetObject, sourceFormKey);
         return true;
     }
 
