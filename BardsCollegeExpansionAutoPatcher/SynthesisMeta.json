@@ -4,7 +4,9 @@
   "OneLineDescription": "",
   "LongDescription": "",
   "PreferredAutoVersioning": "Default",
-  "RequiredMods": [],
+  "RequiredMods": [
+    "kinggathcreations_bard.esm"
+  ],
   "TargetedReleases": [
     "SkyrimLE",
     "SkyrimSE",

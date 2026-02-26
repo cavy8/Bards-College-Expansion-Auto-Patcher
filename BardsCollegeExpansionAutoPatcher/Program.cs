@@ -57,6 +57,16 @@ public static class Program
 
     private static Lazy<Settings> _settings = null!;
 
+    private sealed record ExecutionContext(
+        PatchMode Mode,
+        ModKey? SourceModKey,
+        int? SourceLoadOrderIndex,
+        IReadOnlySet<ModKey> BlacklistedMods,
+        IReadOnlyDictionary<ModKey, int> LoadOrderIndex)
+    {
+        public bool IsSourceMode => Mode == PatchMode.SourcePlugin;
+    }
+
     public static async Task<int> Main(string[] args)
     {
         var pipeline = SynthesisPipeline.Instance;
@@ -71,6 +81,10 @@ public static class Program
     public static void RunPatch(IPatcherState<ISkyrimMod, ISkyrimModGetter> state)
     {
         var settings = _settings.Value;
+        var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
+        var loadOrderIndex = state.LoadOrder.ListedOrder
+            .Select((listing, index) => (listing.ModKey, index))
+            .ToDictionary(x => x.ModKey, x => x.index);
 
         var bceModPresent = state.LoadOrder.ContainsKey(BceModKey);
         if (!bceModPresent)
@@ -126,17 +140,178 @@ public static class Program
             Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Warning: Winking Skeever Cell1 mapping contains non-00 load-order prefixes.");
         }
 
+        if (!TryBuildExecutionContext(state, settings, blacklistedMods, loadOrderIndex, out var executionContext))
+        {
+            return;
+        }
+
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Active patch mode: {executionContext.Mode}");
+        if (executionContext.IsSourceMode)
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Source plugin: {executionContext.SourceModKey!.Value.FileName} (load order index {executionContext.SourceLoadOrderIndex}).");
+        }
+        else
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Global mode: SourcePlugin setting is ignored.");
+        }
+
+        if (executionContext.IsSourceMode)
+        {
+            RunSourcePluginMode(state, settings, executionContext, bardsRefMapping, winkingRefMapping);
+        }
+        else
+        {
+            RunGlobalMode(state, settings, executionContext, bardsRefMapping, winkingRefMapping);
+        }
+    }
+
+    private static bool TryBuildExecutionContext(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        HashSet<ModKey> blacklistedMods,
+        Dictionary<ModKey, int> loadOrderIndex,
+        out ExecutionContext executionContext)
+    {
+        if (settings.Mode == PatchMode.Global)
+        {
+            executionContext = new ExecutionContext(
+                Mode: PatchMode.Global,
+                SourceModKey: null,
+                SourceLoadOrderIndex: null,
+                BlacklistedMods: blacklistedMods,
+                LoadOrderIndex: loadOrderIndex);
+            return true;
+        }
+
+        if (string.IsNullOrWhiteSpace(settings.SourcePlugin))
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] SourcePlugin is required when Mode={PatchMode.SourcePlugin}.");
+            executionContext = null!;
+            return false;
+        }
+
+        if (!ModKey.TryFromNameAndExtension(settings.SourcePlugin.Trim(), out var sourceModKey))
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] SourcePlugin is not a valid plugin name: '{settings.SourcePlugin}'.");
+            executionContext = null!;
+            return false;
+        }
+
+        if (!state.LoadOrder.ContainsKey(sourceModKey))
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] SourcePlugin is not present in load order: {sourceModKey.FileName}.");
+            executionContext = null!;
+            return false;
+        }
+
+        if (blacklistedMods.Contains(sourceModKey))
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] SourcePlugin cannot be blacklisted: {sourceModKey.FileName}.");
+            executionContext = null!;
+            return false;
+        }
+
+        if (sourceModKey == BceModKey)
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] SourcePlugin cannot be BCE itself: {sourceModKey.FileName}.");
+            executionContext = null!;
+            return false;
+        }
+
+        if (VanillaMasterModKeys.Contains(sourceModKey))
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] SourcePlugin cannot be a vanilla master: {sourceModKey.FileName}.");
+            executionContext = null!;
+            return false;
+        }
+
+        if (sourceModKey == state.PatchMod.ModKey)
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] SourcePlugin cannot match output patch plugin: {sourceModKey.FileName}.");
+            executionContext = null!;
+            return false;
+        }
+
+        if (!loadOrderIndex.TryGetValue(sourceModKey, out var sourceLoadOrderIndex))
+        {
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Could not determine load-order index for source plugin: {sourceModKey.FileName}.");
+            executionContext = null!;
+            return false;
+        }
+
+        executionContext = new ExecutionContext(
+            Mode: PatchMode.SourcePlugin,
+            SourceModKey: sourceModKey,
+            SourceLoadOrderIndex: sourceLoadOrderIndex,
+            BlacklistedMods: blacklistedMods,
+            LoadOrderIndex: loadOrderIndex);
+        return true;
+    }
+
+    private static void RunSourcePluginMode(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        ExecutionContext executionContext,
+        RefMapping bardsRefMapping,
+        RefMapping winkingRefMapping)
+    {
         var intentionallyModifiedFormKeys = new HashSet<FormKey>();
         var movedBardsReferences = new HashSet<FormKey>();
+        var copiedWinkingReferences = new HashSet<FormKey>();
 
-        MoveNewReferencesToBceCell(state, settings, bardsRefMapping, intentionallyModifiedFormKeys, movedBardsReferences);
-        SyncMappedReferencesToBce(state, settings, bardsRefMapping, intentionallyModifiedFormKeys);
-        SwapCellAndReferencePointers(state, settings, bardsRefMapping, intentionallyModifiedFormKeys);
+        MoveNewReferencesToBceCell(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys, movedBardsReferences);
+        SyncMappedReferencesToBce(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys);
+        CopyNewReferencesToBceWinkingCell(state, settings, executionContext, winkingRefMapping, intentionallyModifiedFormKeys, copiedWinkingReferences);
+        SyncWinkingMappedReferencesToBce(state, settings, executionContext, winkingRefMapping, intentionallyModifiedFormKeys);
+        SwapCellAndReferencePointers(
+            state,
+            settings,
+            executionContext,
+            bardsRefMapping,
+            intentionallyModifiedFormKeys,
+            movedBardsReferences,
+            copiedWinkingReferences);
         RewireMovedReplacementDoorsForBardsCollege(state, settings, intentionallyModifiedFormKeys, bardsRefMapping, movedBardsReferences);
         RemapBardsCollegeNavigationDoorLinks(state, settings, intentionallyModifiedFormKeys, movedBardsReferences);
 
-        CopyNewReferencesToBceWinkingCell(state, settings, winkingRefMapping, intentionallyModifiedFormKeys);
-        SyncWinkingMappedReferencesToBce(state, settings, winkingRefMapping, intentionallyModifiedFormKeys);
+        CleanupUnintentionalPatchRecords(state, intentionallyModifiedFormKeys, settings);
+        SyncPatchHeaderRecordCount(state, settings);
+    }
+
+    private static void RunGlobalMode(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings,
+        ExecutionContext executionContext,
+        RefMapping bardsRefMapping,
+        RefMapping winkingRefMapping)
+    {
+        var intentionallyModifiedFormKeys = new HashSet<FormKey>();
+        var movedBardsReferences = new HashSet<FormKey>();
+        var copiedWinkingReferences = new HashSet<FormKey>();
+
+        MoveNewReferencesToBceCell(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys, movedBardsReferences);
+        SyncMappedReferencesToBce(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys);
+        CopyNewReferencesToBceWinkingCell(state, settings, executionContext, winkingRefMapping, intentionallyModifiedFormKeys, copiedWinkingReferences);
+        SyncWinkingMappedReferencesToBce(state, settings, executionContext, winkingRefMapping, intentionallyModifiedFormKeys);
+        SwapCellAndReferencePointers(
+            state,
+            settings,
+            executionContext,
+            bardsRefMapping,
+            intentionallyModifiedFormKeys,
+            movedBardsReferences,
+            copiedWinkingReferences);
+        RewireMovedReplacementDoorsForBardsCollege(state, settings, intentionallyModifiedFormKeys, bardsRefMapping, movedBardsReferences);
+        RemapBardsCollegeNavigationDoorLinks(state, settings, intentionallyModifiedFormKeys, movedBardsReferences);
 
         CleanupUnintentionalPatchRecords(state, intentionallyModifiedFormKeys, settings);
         SyncPatchHeaderRecordCount(state, settings);
@@ -145,6 +320,7 @@ public static class Program
     private static void MoveNewReferencesToBceCell(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
+        ExecutionContext executionContext,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys,
         HashSet<FormKey> movedBardsReferences)
@@ -152,9 +328,10 @@ public static class Program
         TransferNewReferencesToBceCell(
             state,
             settings,
+            executionContext,
             refMapping,
             intentionallyModifiedFormKeys,
-            movedBardsReferences,
+            trackedTransferredReferences: movedBardsReferences,
             VanillaBardsCollegeCell,
             BceBardsCollegeCell,
             removeFromVanillaCell: true,
@@ -164,15 +341,18 @@ public static class Program
     private static void CopyNewReferencesToBceWinkingCell(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
+        ExecutionContext executionContext,
         RefMapping refMapping,
-        HashSet<FormKey> intentionallyModifiedFormKeys)
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        HashSet<FormKey> copiedWinkingReferences)
     {
         TransferNewReferencesToBceCell(
             state,
             settings,
+            executionContext,
             refMapping,
             intentionallyModifiedFormKeys,
-            movedBardsReferences: null,
+            trackedTransferredReferences: copiedWinkingReferences,
             VanillaWinkingSkeeverCell,
             BceWinkingSkeeverCell,
             removeFromVanillaCell: false,
@@ -182,9 +362,10 @@ public static class Program
     private static void TransferNewReferencesToBceCell(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
+        ExecutionContext executionContext,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys,
-        HashSet<FormKey>? movedBardsReferences,
+        HashSet<FormKey>? trackedTransferredReferences,
         FormKey vanillaCell,
         FormKey bceCell,
         bool removeFromVanillaCell,
@@ -208,18 +389,51 @@ public static class Program
         }
 
         var vanillaCellGetter = vanillaCellContext.Record;
-        var bceCellGetter = bceCellContext.Record;
+        IEnumerable<IPlacedGetter> candidateInputs;
+        HashSet<FormKey> activePersistentRefs;
+        HashSet<FormKey> activeTemporaryRefs;
 
-        var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
-        var winningPersistentRefs = vanillaCellGetter.Persistent?.Select(x => x.FormKey).ToHashSet() ?? [];
-        var winningTemporaryRefs = vanillaCellGetter.Temporary?.Select(x => x.FormKey).ToHashSet() ?? [];
-        var allWinningRefs = (vanillaCellGetter.Persistent ?? [])
-            .Concat(vanillaCellGetter.Temporary ?? [])
-            .GroupBy(x => x.FormKey)
-            .Select(x => x.First());
+        if (executionContext.IsSourceMode)
+        {
+            if (!TryGetSourceAndPreviousRecords<ICellGetter>(state, vanillaCell, executionContext, out var sourceCell, out var previousCell))
+            {
+                Console.WriteLine(
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2 ({locationName}): source plugin does not provide usable cell delta.");
+                return;
+            }
+
+            var sourceRefsByFormKey = EnumerateCellPlaced(sourceCell)
+                .GroupBy(x => x.FormKey)
+                .ToDictionary(x => x.Key, x => x.First());
+            var previousRefKeys = EnumerateCellPlaced(previousCell)
+                .Select(x => x.FormKey)
+                .ToHashSet();
+            var addedFormKeys = sourceRefsByFormKey.Keys
+                .Where(formKey => !previousRefKeys.Contains(formKey))
+                .ToList();
+
+            candidateInputs = addedFormKeys
+                .Select(formKey => sourceRefsByFormKey[formKey]);
+            activePersistentRefs = sourceCell.Persistent?.Select(x => x.FormKey).ToHashSet() ?? [];
+            activeTemporaryRefs = sourceCell.Temporary?.Select(x => x.FormKey).ToHashSet() ?? [];
+
+            if (settings.Debug)
+            {
+                Console.WriteLine(
+                    $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2 ({locationName}): source cell added refs={addedFormKeys.Count} (previous->source delta).");
+            }
+        }
+        else
+        {
+            candidateInputs = EnumerateCellPlaced(vanillaCellGetter)
+                .GroupBy(x => x.FormKey)
+                .Select(x => x.First());
+            activePersistentRefs = vanillaCellGetter.Persistent?.Select(x => x.FormKey).ToHashSet() ?? [];
+            activeTemporaryRefs = vanillaCellGetter.Temporary?.Select(x => x.FormKey).ToHashSet() ?? [];
+        }
 
         var candidates = new List<IPlacedGetter>();
-        foreach (var placed in allWinningRefs)
+        foreach (var placed in candidateInputs)
         {
             if (placed is not IPlacedObjectGetter && placed is not IPlacedNpcGetter && placed is not IAPlacedTrapGetter)
             {
@@ -237,7 +451,7 @@ public static class Program
             }
 
             var sourceMod = placed.FormKey.ModKey;
-            if (VanillaMasterModKeys.Contains(sourceMod))
+            if (!executionContext.IsSourceMode && VanillaMasterModKeys.Contains(sourceMod))
             {
                 continue;
             }
@@ -247,7 +461,7 @@ public static class Program
                 continue;
             }
 
-            if (blacklistedMods.Contains(sourceMod))
+            if (!executionContext.IsSourceMode && executionContext.BlacklistedMods.Contains(sourceMod))
             {
                 continue;
             }
@@ -283,7 +497,7 @@ public static class Program
         var movedCount = 0;
         foreach (var placed in candidates)
         {
-            var shouldBePersistent = winningPersistentRefs.Contains(placed.FormKey) || !winningTemporaryRefs.Contains(placed.FormKey);
+            var shouldBePersistent = activePersistentRefs.Contains(placed.FormKey) || !activeTemporaryRefs.Contains(placed.FormKey);
             var copied = ClonePlaced(placed);
 
             if (removeFromVanillaCell)
@@ -306,7 +520,7 @@ public static class Program
 
             movedCount++;
             intentionallyModifiedFormKeys.Add(placed.FormKey);
-            movedBardsReferences?.Add(placed.FormKey);
+            trackedTransferredReferences?.Add(placed.FormKey);
 
             if (settings.Debug)
             {
@@ -389,6 +603,66 @@ public static class Program
         return result;
     }
 
+    private static IEnumerable<IPlacedGetter> EnumerateCellPlaced(ICellGetter cell)
+    {
+        return (cell.Persistent ?? []).Concat(cell.Temporary ?? []);
+    }
+
+    private static bool TryGetSourceAndPreviousRecords<TRecordGetter>(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        FormKey formKey,
+        ExecutionContext executionContext,
+        out TRecordGetter sourceRecord,
+        out TRecordGetter previousRecord)
+        where TRecordGetter : class, IMajorRecordGetter
+    {
+        sourceRecord = null!;
+        previousRecord = null!;
+
+        if (!executionContext.IsSourceMode
+            || executionContext.SourceModKey is null
+            || executionContext.SourceLoadOrderIndex is null)
+        {
+            return false;
+        }
+
+        var sourceModKey = executionContext.SourceModKey.Value;
+        var sourceLoadOrderIndex = executionContext.SourceLoadOrderIndex.Value;
+
+        var orderedContexts = formKey
+            .ToLink<TRecordGetter>()
+            .ResolveAllSimpleContexts<TRecordGetter>(state.LinkCache)
+            .Where(context => context.ModKey != state.PatchMod.ModKey && !executionContext.BlacklistedMods.Contains(context.ModKey))
+            .Select(context =>
+            {
+                var index = executionContext.LoadOrderIndex.TryGetValue(context.ModKey, out var resolvedIndex)
+                    ? resolvedIndex
+                    : int.MinValue;
+                return (Context: context, Index: index);
+            })
+            .OrderBy(x => x.Index)
+            .ToList();
+
+        var sourceContext = orderedContexts.FirstOrDefault(x => x.Context.ModKey == sourceModKey).Context;
+        if (sourceContext is null)
+        {
+            return false;
+        }
+
+        var previousContext = orderedContexts
+            .Where(x => x.Index < sourceLoadOrderIndex)
+            .Select(x => x.Context)
+            .LastOrDefault();
+        if (previousContext is null)
+        {
+            return false;
+        }
+
+        sourceRecord = sourceContext.Record;
+        previousRecord = previousContext.Record;
+        return true;
+    }
+
     private static bool RemovePlacedByFormKey(IList<IPlaced> list, FormKey formKey)
     {
         var removed = false;
@@ -428,12 +702,14 @@ public static class Program
     private static void SyncMappedReferencesToBce(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
+        ExecutionContext executionContext,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys)
     {
         SyncMappedReferencesToBceForCell(
             state,
             settings,
+            executionContext,
             refMapping,
             intentionallyModifiedFormKeys,
             VanillaBardsCollegeCell,
@@ -444,12 +720,14 @@ public static class Program
     private static void SyncWinkingMappedReferencesToBce(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
+        ExecutionContext executionContext,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys)
     {
         SyncMappedReferencesToBceForCell(
             state,
             settings,
+            executionContext,
             refMapping,
             intentionallyModifiedFormKeys,
             VanillaWinkingSkeeverCell,
@@ -460,17 +738,13 @@ public static class Program
     private static void SyncMappedReferencesToBceForCell(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
+        ExecutionContext executionContext,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys,
         FormKey vanillaCell,
         FormKey bceCell,
         string locationName)
     {
-        var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
-        var loadOrderIndex = state.LoadOrder.ListedOrder
-            .Select((listing, index) => (listing.ModKey, index))
-            .ToDictionary(x => x.ModKey, x => x.index);
-
         var evaluated = 0;
         var changed = 0;
 
@@ -478,43 +752,62 @@ public static class Program
         {
             evaluated++;
 
-            var cell1Link = pair.Key.ToLink<IPlacedGetter>();
-            var allCell1Contexts = cell1Link
-                .ResolveAllSimpleContexts<IPlacedGetter>(state.LinkCache)
-                .Select(x => (Typed: x, Untyped: (IModContext)x))
-                .Where(x => x.Untyped.ModKey != state.PatchMod.ModKey)
-                .ToList();
+            IPlacedGetter sourceRecord;
+            IPlacedGetter comparisonBaselineRecord;
+            ModKey deltaSourceModKey;
 
-            if (allCell1Contexts.Count == 0)
+            if (executionContext.IsSourceMode)
             {
-                continue;
-            }
+                if (!TryGetSourceAndPreviousRecords<IPlacedGetter>(
+                        state,
+                        pair.Key,
+                        executionContext,
+                        out sourceRecord,
+                        out comparisonBaselineRecord))
+                {
+                    continue;
+                }
 
-            var sourceContext = allCell1Contexts.FirstOrDefault(x => x.Untyped.ModKey == pair.Key.ModKey);
-            if (sourceContext.Typed is null)
+                deltaSourceModKey = executionContext.SourceModKey!.Value;
+            }
+            else
             {
-                continue;
+                var cell1Link = pair.Key.ToLink<IPlacedGetter>();
+                var allCell1Contexts = cell1Link
+                    .ResolveAllSimpleContexts<IPlacedGetter>(state.LinkCache)
+                    .Select(x => (Typed: x, Untyped: (IModContext)x))
+                    .Where(x => x.Untyped.ModKey != state.PatchMod.ModKey)
+                    .ToList();
+                if (allCell1Contexts.Count == 0)
+                {
+                    continue;
+                }
+
+                var sourceContext = allCell1Contexts.FirstOrDefault(x => x.Untyped.ModKey == pair.Key.ModKey);
+                if (sourceContext.Typed is null)
+                {
+                    continue;
+                }
+
+                var winningContext = allCell1Contexts
+                    .Where(x => !executionContext.BlacklistedMods.Contains(x.Untyped.ModKey))
+                    .OrderBy(x => executionContext.LoadOrderIndex.TryGetValue(x.Untyped.ModKey, out var index) ? index : int.MinValue)
+                    .LastOrDefault();
+                if (winningContext.Typed is null)
+                {
+                    continue;
+                }
+
+                var winningModKey = winningContext.Untyped.ModKey;
+                if (VanillaMasterModKeys.Contains(winningModKey) || winningModKey == BceModKey || executionContext.BlacklistedMods.Contains(winningModKey))
+                {
+                    continue;
+                }
+
+                sourceRecord = winningContext.Typed.Record;
+                comparisonBaselineRecord = sourceContext.Typed.Record;
+                deltaSourceModKey = winningModKey;
             }
-
-            var winningContext = allCell1Contexts
-                .Where(x => !blacklistedMods.Contains(x.Untyped.ModKey))
-                .OrderBy(x => loadOrderIndex.TryGetValue(x.Untyped.ModKey, out var index) ? index : int.MinValue)
-                .LastOrDefault();
-
-            if (winningContext.Typed is null)
-            {
-                continue;
-            }
-
-            var winningModKey = winningContext.Untyped.ModKey;
-
-            if (VanillaMasterModKeys.Contains(winningModKey) || winningModKey == BceModKey || blacklistedMods.Contains(winningModKey))
-            {
-                continue;
-            }
-
-            var originalRecord = sourceContext.Typed.Record;
-            var winningRecord = winningContext.Typed.Record;
 
             var cell2Link = pair.Value.ToLink<IPlacedGetter>();
             if (!cell2Link.TryResolveContext<ISkyrimMod, ISkyrimModGetter, IPlaced, IPlacedGetter>(state.LinkCache, out var cell2Context))
@@ -523,7 +816,7 @@ public static class Program
             }
 
             var cell2Override = cell2Context.GetOrAddAsOverride(state.PatchMod);
-            if (!HaveMatchingPlacedKind(winningRecord, cell2Override))
+            if (!HaveMatchingPlacedKind(sourceRecord, cell2Override))
             {
                 if (settings.Debug)
                 {
@@ -533,7 +826,7 @@ public static class Program
                 continue;
             }
 
-            if (!ApplyChangedProperties(originalRecord, winningRecord, cell2Override, settings))
+            if (!ApplyChangedProperties(comparisonBaselineRecord, sourceRecord, cell2Override, settings))
             {
                 continue;
             }
@@ -543,76 +836,92 @@ public static class Program
 
             if (settings.Debug)
             {
-                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: synced {pair.Key} -> {pair.Value} from {winningModKey.FileName}.");
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3: synced {pair.Key} -> {pair.Value} from {deltaSourceModKey.FileName}.");
             }
         }
 
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 ({locationName}): evaluated {evaluated} mapped refs, synced {changed}.");
 
-        SyncCellChanges(state, settings, intentionallyModifiedFormKeys, vanillaCell, bceCell, locationName);
+        SyncCellChanges(state, settings, executionContext, intentionallyModifiedFormKeys, vanillaCell, bceCell, locationName);
     }
 
     private static void SyncBardsCollegeCellChanges(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
+        ExecutionContext executionContext,
         HashSet<FormKey> intentionallyModifiedFormKeys)
     {
-        SyncCellChanges(state, settings, intentionallyModifiedFormKeys, VanillaBardsCollegeCell, BceBardsCollegeCell, "Bards College");
+        SyncCellChanges(state, settings, executionContext, intentionallyModifiedFormKeys, VanillaBardsCollegeCell, BceBardsCollegeCell, "Bards College");
     }
 
     private static void SyncCellChanges(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
+        ExecutionContext executionContext,
         HashSet<FormKey> intentionallyModifiedFormKeys,
         FormKey vanillaCell,
         FormKey bceCell,
         string locationName)
     {
-        var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
-        var loadOrderIndex = state.LoadOrder.ListedOrder
-            .Select((listing, index) => (listing.ModKey, index))
-            .ToDictionary(x => x.ModKey, x => x.index);
+        ICellGetter sourceRecord;
+        ICellGetter baselineRecord;
+        ModKey deltaSourceModKey;
 
-        var vanillaCellLink = vanillaCell.ToLink<ICellGetter>();
-        var allVanillaCellContexts = vanillaCellLink
-            .ResolveAllSimpleContexts<ICellGetter>(state.LinkCache)
-            .Select(x => (Typed: x, Untyped: (IModContext)x))
-            .Where(x => x.Untyped.ModKey != state.PatchMod.ModKey)
-            .ToList();
-
-        if (allVanillaCellContexts.Count == 0)
+        if (executionContext.IsSourceMode)
         {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): no contexts found for {vanillaCell}.");
-            return;
-        }
-
-        var sourceContext = allVanillaCellContexts.FirstOrDefault(x => x.Untyped.ModKey == vanillaCell.ModKey);
-        if (sourceContext.Typed is null)
-        {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): source context missing for {vanillaCell}.");
-            return;
-        }
-
-        var winningContext = allVanillaCellContexts
-            .Where(x => !blacklistedMods.Contains(x.Untyped.ModKey))
-            .OrderBy(x => loadOrderIndex.TryGetValue(x.Untyped.ModKey, out var index) ? index : int.MinValue)
-            .LastOrDefault();
-
-        if (winningContext.Typed is null)
-        {
-            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): winning context missing for {vanillaCell}.");
-            return;
-        }
-
-        var winningModKey = winningContext.Untyped.ModKey;
-        if (VanillaMasterModKeys.Contains(winningModKey) || winningModKey == BceModKey || blacklistedMods.Contains(winningModKey))
-        {
-            if (settings.Debug)
+            if (!TryGetSourceAndPreviousRecords<ICellGetter>(state, vanillaCell, executionContext, out sourceRecord, out baselineRecord))
             {
-                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): skipped (winning mod {winningModKey.FileName} is excluded).");
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): source plugin does not override {vanillaCell}.");
+                return;
             }
 
-            return;
+            deltaSourceModKey = executionContext.SourceModKey!.Value;
+        }
+        else
+        {
+            var vanillaCellLink = vanillaCell.ToLink<ICellGetter>();
+            var allVanillaCellContexts = vanillaCellLink
+                .ResolveAllSimpleContexts<ICellGetter>(state.LinkCache)
+                .Select(x => (Typed: x, Untyped: (IModContext)x))
+                .Where(x => x.Untyped.ModKey != state.PatchMod.ModKey)
+                .ToList();
+            if (allVanillaCellContexts.Count == 0)
+            {
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): no contexts found for {vanillaCell}.");
+                return;
+            }
+
+            var sourceContext = allVanillaCellContexts.FirstOrDefault(x => x.Untyped.ModKey == vanillaCell.ModKey);
+            if (sourceContext.Typed is null)
+            {
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): source context missing for {vanillaCell}.");
+                return;
+            }
+
+            var winningContext = allVanillaCellContexts
+                .Where(x => !executionContext.BlacklistedMods.Contains(x.Untyped.ModKey))
+                .OrderBy(x => executionContext.LoadOrderIndex.TryGetValue(x.Untyped.ModKey, out var index) ? index : int.MinValue)
+                .LastOrDefault();
+            if (winningContext.Typed is null)
+            {
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): winning context missing for {vanillaCell}.");
+                return;
+            }
+
+            var winningModKey = winningContext.Untyped.ModKey;
+            if (VanillaMasterModKeys.Contains(winningModKey) || winningModKey == BceModKey || executionContext.BlacklistedMods.Contains(winningModKey))
+            {
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): skipped (winning mod {winningModKey.FileName} is excluded).");
+                }
+
+                return;
+            }
+
+            sourceRecord = winningContext.Typed.Record;
+            baselineRecord = sourceContext.Typed.Record;
+            deltaSourceModKey = winningModKey;
         }
 
         var bceCellLink = bceCell.ToLink<ICellGetter>();
@@ -623,7 +932,7 @@ public static class Program
         }
 
         var bceCellOverride = bceCellContext.GetOrAddAsOverride(state.PatchMod);
-        var changedAny = ApplyChangedCellProperties(sourceContext.Typed.Record, winningContext.Typed.Record, bceCellOverride, settings);
+        var changedAny = ApplyChangedCellProperties(baselineRecord, sourceRecord, bceCellOverride, settings);
         if (!changedAny)
         {
             Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): no cell-level changes to mirror.");
@@ -631,7 +940,7 @@ public static class Program
         }
 
         intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
-        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): mirrored cell-level changes from {winningModKey.FileName} to BCE cell.");
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 3 cell sync ({locationName}): mirrored cell-level changes from {deltaSourceModKey.FileName} to BCE cell.");
     }
 
     private static bool ApplyChangedCellProperties(
@@ -694,18 +1003,79 @@ public static class Program
     private static void SwapCellAndReferencePointers(
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
+        ExecutionContext executionContext,
         RefMapping refMapping,
-        HashSet<FormKey> intentionallyModifiedFormKeys)
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        HashSet<FormKey> movedBardsReferences,
+        HashSet<FormKey> copiedWinkingReferences)
     {
-        var blacklistedMods = ParseBlacklist(settings.BlacklistedPlugins);
         var swapMap = BuildSwapMap(refMapping);
-        var bceCellOverride = GetBceCellOverrideOrNull(state, BceBardsCollegeCell);
+        var bceBardsCellOverride = GetBceCellOverrideOrNull(state, BceBardsCollegeCell);
+        var bceWinkingCellOverride = GetBceCellOverrideOrNull(state, BceWinkingSkeeverCell);
 
         var evaluatedRecords = 0;
         var qualifyingRecords = 0;
         var swappedRecords = 0;
         var swappedLinks = 0;
 
+        if (executionContext.IsSourceMode)
+        {
+            var sourceModKey = executionContext.SourceModKey!.Value;
+            foreach (var winningContext in state.LoadOrder.ListedOrder.WinningContextOverrides<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>(state.LinkCache))
+            {
+                if (winningContext.ModKey == state.PatchMod.ModKey || executionContext.BlacklistedMods.Contains(winningContext.ModKey))
+                {
+                    continue;
+                }
+
+                var sourceContext = winningContext.Record.FormKey
+                    .ToLink<IMajorRecordGetter>()
+                    .ResolveAllSimpleContexts<IMajorRecordGetter>(state.LinkCache)
+                    .FirstOrDefault(x => x.ModKey == sourceModKey);
+                if (sourceContext is null)
+                {
+                    continue;
+                }
+
+                evaluatedRecords++;
+                if (sourceContext.Record is not IFormLinkContainerGetter sourceRecordWithLinks)
+                {
+                    continue;
+                }
+
+                var matchedLinksInRecord = sourceRecordWithLinks
+                    .EnumerateFormLinks()
+                    .Count(link => swapMap.ContainsKey(link.FormKey));
+                if (matchedLinksInRecord == 0)
+                {
+                    continue;
+                }
+
+                qualifyingRecords++;
+                var overrideRecord = winningContext.GetOrAddAsOverride(state.PatchMod);
+                if (overrideRecord is not IFormLinkContainer mutableRecord)
+                {
+                    if (settings.Debug)
+                    {
+                        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: skipped {winningContext.Record.FormKey} (not mutable FormLink container).");
+                    }
+
+                    continue;
+                }
+
+                mutableRecord.RemapLinks(swapMap);
+                swappedRecords++;
+                swappedLinks += matchedLinksInRecord;
+                intentionallyModifiedFormKeys.Add(overrideRecord.FormKey);
+
+                if (settings.Debug)
+                {
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: remapped {matchedLinksInRecord} links in {overrideRecord.FormKey} from {sourceModKey.FileName}.");
+                }
+            }
+        }
+        else
+        {
         foreach (var context in state.LoadOrder.ListedOrder.WinningContextOverrides<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>(state.LinkCache))
         {
             evaluatedRecords++;
@@ -713,7 +1083,7 @@ public static class Program
             if (sourceModKey == state.PatchMod.ModKey
                 || sourceModKey == BceModKey
                 || VanillaMasterModKeys.Contains(sourceModKey)
-                || blacklistedMods.Contains(sourceModKey))
+                || executionContext.BlacklistedMods.Contains(sourceModKey))
             {
                 continue;
             }
@@ -733,14 +1103,14 @@ public static class Program
 
             qualifyingRecords++;
 
-            if (bceCellOverride is not null
-                && TryGetPatchedPlacedByFormKey(bceCellOverride, context.Record.FormKey, out var patchedPlaced)
+            if (bceBardsCellOverride is not null
+                && TryGetPatchedPlacedByFormKey(bceBardsCellOverride, context.Record.FormKey, out var patchedPlaced)
                 && patchedPlaced is IFormLinkContainer patchedPlacedWithLinks)
             {
                 patchedPlacedWithLinks.RemapLinks(swapMap);
                 swappedRecords++;
                 swappedLinks += matchedLinksInRecord;
-                intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
+                intentionallyModifiedFormKeys.Add(bceBardsCellOverride.FormKey);
                 intentionallyModifiedFormKeys.Add(patchedPlaced.FormKey);
 
                 if (settings.Debug)
@@ -772,9 +1142,24 @@ public static class Program
                 Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: remapped {matchedLinksInRecord} links in {overrideRecord.FormKey} from {sourceModKey.FileName}.");
             }
         }
+        }
+
+        swappedLinks += RemapLinksInTransferredPlacedRecords(
+            bceBardsCellOverride,
+            movedBardsReferences,
+            swapMap,
+            intentionallyModifiedFormKeys,
+            out var transferredBardsSwappedRecords);
+        swappedLinks += RemapLinksInTransferredPlacedRecords(
+            bceWinkingCellOverride,
+            copiedWinkingReferences,
+            swapMap,
+            intentionallyModifiedFormKeys,
+            out var transferredWinkingSwappedRecords);
+        swappedRecords += transferredBardsSwappedRecords + transferredWinkingSwappedRecords;
 
         Console.WriteLine(
-            $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: evaluated {evaluatedRecords} winning records, "
+            $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: evaluated {evaluatedRecords} records, "
             + $"found {qualifyingRecords} with BCE swaps, remapped {swappedLinks} links across {swappedRecords} records.");
     }
 
@@ -791,6 +1176,46 @@ public static class Program
         }
 
         return map;
+    }
+
+    private static int RemapLinksInTransferredPlacedRecords(
+        ICell? bceCellOverride,
+        IEnumerable<FormKey> transferredRefs,
+        IReadOnlyDictionary<FormKey, FormKey> swapMap,
+        HashSet<FormKey> intentionallyModifiedFormKeys,
+        out int swappedRecords)
+    {
+        swappedRecords = 0;
+        if (bceCellOverride is null)
+        {
+            return 0;
+        }
+
+        var swappedLinks = 0;
+        foreach (var formKey in transferredRefs)
+        {
+            if (!TryGetPatchedPlacedByFormKey(bceCellOverride, formKey, out var patchedPlaced)
+                || patchedPlaced is not IFormLinkContainer patchedPlacedWithLinks)
+            {
+                continue;
+            }
+
+            var matchedLinksInRecord = patchedPlacedWithLinks
+                .EnumerateFormLinks()
+                .Count(link => swapMap.ContainsKey(link.FormKey));
+            if (matchedLinksInRecord == 0)
+            {
+                continue;
+            }
+
+            patchedPlacedWithLinks.RemapLinks(swapMap);
+            swappedLinks += matchedLinksInRecord;
+            swappedRecords++;
+            intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
+            intentionallyModifiedFormKeys.Add(patchedPlaced.FormKey);
+        }
+
+        return swappedLinks;
     }
 
     private static void CleanupUnintentionalPatchRecords(
