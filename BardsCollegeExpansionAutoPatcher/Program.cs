@@ -139,6 +139,7 @@ public static class Program
         SyncWinkingMappedReferencesToBce(state, settings, winkingRefMapping, intentionallyModifiedFormKeys);
 
         CleanupUnintentionalPatchRecords(state, intentionallyModifiedFormKeys, settings);
+        SyncPatchHeaderRecordCount(state, settings);
     }
 
     private static void MoveNewReferencesToBceCell(
@@ -837,6 +838,21 @@ public static class Program
 
         var keptCount = totalBeforeCleanup - removedCount;
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Cleanup: kept {keptCount} intentional records, removed {removedCount} non-intentional records.");
+    }
+
+    private static void SyncPatchHeaderRecordCount(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        Settings settings)
+    {
+        var modHeaderCommon = (IModHeaderCommon)state.PatchMod.ModHeader;
+        var previousCount = modHeaderCommon.NumRecords;
+        var actualCount = state.PatchMod.GetRecordCount();
+        modHeaderCommon.NumRecords = actualCount;
+
+        if (settings.Debug)
+        {
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Header record count sync: {previousCount} -> {actualCount}.");
+        }
     }
 
     private sealed record InteriorDoorPair(
