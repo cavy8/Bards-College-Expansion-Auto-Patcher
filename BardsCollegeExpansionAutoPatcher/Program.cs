@@ -258,8 +258,8 @@ public static class Program
         RefMapping winkingRefMapping)
     {
         var intentionallyModifiedFormKeys = new HashSet<FormKey>();
-        var movedBardsReferences = new HashSet<FormKey>();
-        var copiedWinkingReferences = new HashSet<FormKey>();
+        var movedBardsReferences = new Dictionary<FormKey, FormKey>();
+        var copiedWinkingReferences = new Dictionary<FormKey, FormKey>();
 
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting Phase 2 transfer/sync pipeline.");
         MoveNewReferencesToBceCell(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys, movedBardsReferences);
@@ -293,8 +293,8 @@ public static class Program
         RefMapping winkingRefMapping)
     {
         var intentionallyModifiedFormKeys = new HashSet<FormKey>();
-        var movedBardsReferences = new HashSet<FormKey>();
-        var copiedWinkingReferences = new HashSet<FormKey>();
+        var movedBardsReferences = new Dictionary<FormKey, FormKey>();
+        var copiedWinkingReferences = new Dictionary<FormKey, FormKey>();
 
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting Phase 2 transfer/sync pipeline.");
         MoveNewReferencesToBceCell(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys, movedBardsReferences);
@@ -326,7 +326,7 @@ public static class Program
         ExecutionContext executionContext,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys,
-        HashSet<FormKey> movedBardsReferences)
+        Dictionary<FormKey, FormKey> movedBardsReferences)
     {
         TransferNewReferencesToBceCell(
             state,
@@ -347,7 +347,7 @@ public static class Program
         ExecutionContext executionContext,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys,
-        HashSet<FormKey> copiedWinkingReferences)
+        Dictionary<FormKey, FormKey> copiedWinkingReferences)
     {
         TransferNewReferencesToBceCell(
             state,
@@ -368,7 +368,7 @@ public static class Program
         ExecutionContext executionContext,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys,
-        HashSet<FormKey>? trackedTransferredReferences,
+        Dictionary<FormKey, FormKey>? trackedTransferredReferences,
         FormKey vanillaCell,
         FormKey bceCell,
         bool removeFromVanillaCell,
@@ -428,7 +428,7 @@ public static class Program
         }
         else
         {
-            candidateInputs = EnumerateCellPlaced(vanillaCellGetter)
+            candidateInputs = EnumerateCellPlaced(state, vanillaCell)
                 .GroupBy(x => x.FormKey)
                 .Select(x => x.First());
             activePersistentRefs = vanillaCellGetter.Persistent?.Select(x => x.FormKey).ToHashSet() ?? [];
@@ -534,7 +534,7 @@ public static class Program
 
             movedCount++;
             intentionallyModifiedFormKeys.Add(copied.FormKey);
-            trackedTransferredReferences?.Add(copied.FormKey);
+            trackedTransferredReferences?.Add(placed.FormKey, copied.FormKey);
 
             if (settings.Debug)
             {
@@ -607,9 +607,24 @@ public static class Program
             .ToHashSet();
     }
 
+    private static IEnumerable<IPlacedGetter> EnumerateCellPlaced(IPatcherState<ISkyrimMod, ISkyrimModGetter> state, FormKey cellFormKey)
+    {
+        // Gather all placed references from every plugin that touches this cell,
+        // then deduplicate by FormKey so we get the winning override for each reference.
+        var cellLink = cellFormKey.ToLink<ICellGetter>();
+        var cellContexts = cellLink.ResolveAllContexts<ISkyrimMod, ISkyrimModGetter, ICell, ICellGetter>(state.LinkCache);
+
+        return cellContexts
+            .SelectMany(c => (c.Record.Persistent ?? Enumerable.Empty<IPlacedGetter>())
+                .Concat(c.Record.Temporary ?? Enumerable.Empty<IPlacedGetter>()))
+            .GroupBy(x => x.FormKey)
+            .Select(g => g.First());
+    }
+
     private static IEnumerable<IPlacedGetter> EnumerateCellPlaced(ICellGetter cell)
     {
-        return (cell.Persistent ?? []).Concat(cell.Temporary ?? []);
+        return (cell.Persistent ?? Enumerable.Empty<IPlacedGetter>())
+            .Concat(cell.Temporary ?? Enumerable.Empty<IPlacedGetter>());
     }
 
     private static bool TryGetSourceAndPreviousRecords<TRecordGetter>(
@@ -1031,8 +1046,8 @@ public static class Program
         ExecutionContext executionContext,
         RefMapping refMapping,
         HashSet<FormKey> intentionallyModifiedFormKeys,
-        HashSet<FormKey> movedBardsReferences,
-        HashSet<FormKey> copiedWinkingReferences)
+        Dictionary<FormKey, FormKey> movedBardsReferences,
+        Dictionary<FormKey, FormKey> copiedWinkingReferences)
     {
         var swapMap = BuildSwapMap(refMapping);
         var bceBardsCellOverride = GetBceCellOverrideOrNull(state, BceBardsCollegeCell);
@@ -1193,14 +1208,21 @@ public static class Program
 
         swappedLinks += RemapLinksInTransferredPlacedRecords(
             bceBardsCellOverride,
-            movedBardsReferences,
+            movedBardsReferences.Values,
             swapMap,
             intentionallyModifiedFormKeys,
             out var transferredBardsSwappedRecords);
+            
+        var winkingCombinedSwapMap = new Dictionary<FormKey, FormKey>(swapMap);
+        foreach (var pair in copiedWinkingReferences)
+        {
+            winkingCombinedSwapMap[pair.Key] = pair.Value;
+        }
+            
         swappedLinks += RemapLinksInTransferredPlacedRecords(
             bceWinkingCellOverride,
-            copiedWinkingReferences,
-            swapMap,
+            copiedWinkingReferences.Values,
+            winkingCombinedSwapMap,
             intentionallyModifiedFormKeys,
             out var transferredWinkingSwappedRecords);
         swappedRecords += transferredBardsSwappedRecords + transferredWinkingSwappedRecords;
@@ -1340,7 +1362,7 @@ public static class Program
         Settings settings,
         HashSet<FormKey> intentionallyModifiedFormKeys,
         RefMapping bardsRefMapping,
-        HashSet<FormKey> movedBardsReferences)
+        Dictionary<FormKey, FormKey> movedBardsReferences)
     {
         var bceCellOverride = GetBceCellOverrideOrNull(state, BceBardsCollegeCell);
         if (bceCellOverride is null)
@@ -1369,7 +1391,7 @@ public static class Program
             }
         }
 
-        foreach (var movedFormKey in movedBardsReferences)
+        foreach (var movedFormKey in movedBardsReferences.Values)
         {
             if (!TryGetPatchedPlacedObjectByFormKey(bceCellOverride, movedFormKey, out var movedDoor))
             {
@@ -1857,7 +1879,7 @@ public static class Program
         IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
         Settings settings,
         HashSet<FormKey> intentionallyModifiedFormKeys,
-        HashSet<FormKey> movedBardsReferences)
+        Dictionary<FormKey, FormKey> movedBardsReferences)
     {
         var bceCellOverride = GetBceCellOverrideOrNull(state, BceBardsCollegeCell);
         if (bceCellOverride is null)
@@ -1889,7 +1911,7 @@ public static class Program
         var triangleSynthesizedFromNearestNonDoor = 0;
         var triangleFallbackFromDoorPosition = 0;
         var triangleSetToNegativeOne = 0;
-        foreach (var movedFormKey in movedBardsReferences)
+        foreach (var movedFormKey in movedBardsReferences.Values)
         {
             if (!TryGetPatchedPlacedObjectByFormKey(bceCellOverride, movedFormKey, out var patchedDoor))
             {
