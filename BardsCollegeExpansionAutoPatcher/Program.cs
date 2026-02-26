@@ -184,18 +184,11 @@ public static class Program
             return true;
         }
 
-        if (string.IsNullOrWhiteSpace(settings.SourcePlugin))
+        var sourceModKey = settings.SourcePlugin;
+        if (sourceModKey.IsNull)
         {
             Console.WriteLine(
                 $"[{nameof(BardsCollegeExpansionAutoPatcher)}] SourcePlugin is required when Mode={PatchMode.SourcePlugin}.");
-            executionContext = null!;
-            return false;
-        }
-
-        if (!ModKey.TryFromNameAndExtension(settings.SourcePlugin.Trim(), out var sourceModKey))
-        {
-            Console.WriteLine(
-                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] SourcePlugin is not a valid plugin name: '{settings.SourcePlugin}'.");
             executionContext = null!;
             return false;
         }
@@ -582,25 +575,11 @@ public static class Program
         };
     }
 
-    private static HashSet<ModKey> ParseBlacklist(IEnumerable<string> rawBlacklist)
+    private static HashSet<ModKey> ParseBlacklist(IEnumerable<ModKey> rawBlacklist)
     {
-        var result = new HashSet<ModKey>();
-
-        foreach (var item in rawBlacklist)
-        {
-            var trimmed = item.Trim();
-            if (string.IsNullOrWhiteSpace(trimmed))
-            {
-                continue;
-            }
-
-            if (ModKey.TryFromNameAndExtension(trimmed, out var modKey))
-            {
-                result.Add(modKey);
-            }
-        }
-
-        return result;
+        return rawBlacklist
+            .Where(modKey => !modKey.IsNull)
+            .ToHashSet();
     }
 
     private static IEnumerable<IPlacedGetter> EnumerateCellPlaced(ICellGetter cell)
