@@ -494,13 +494,13 @@ public static class Program
             return;
         }
 
+        var bceCellOverride = bceCellContext.GetOrAddAsOverride(state.PatchMod);
         ICell? vanillaCellOverride = null;
+
         if (removeFromVanillaCell)
         {
             vanillaCellOverride = vanillaCellContext.GetOrAddAsOverride(state.PatchMod);
         }
-
-        var bceCellOverride = bceCellContext.GetOrAddAsOverride(state.PatchMod);
 
         var movedCount = 0;
         foreach (var placed in candidates)
@@ -510,12 +510,18 @@ public static class Program
 
             if (removeFromVanillaCell && vanillaCellOverride is not null)
             {
-                RemovePlacedByFormKey(vanillaCellOverride.Persistent, placed.FormKey);
+                RemovePlacedByFormKey(vanillaCellOverride!.Persistent, placed.FormKey);
                 RemovePlacedByFormKey(vanillaCellOverride.Temporary, placed.FormKey);
             }
+            else
+            {
+                // This is a true copy, so we must associate a brand new FormKey with the cloned object
+                copied.FormKey = state.PatchMod.GetNextFormKey();
+            }
 
-            RemovePlacedByFormKey(bceCellOverride.Persistent, placed.FormKey);
-            RemovePlacedByFormKey(bceCellOverride.Temporary, placed.FormKey);
+            // Ensure the newly copied/moved form key doesn't already exist in the target
+            RemovePlacedByFormKey(bceCellOverride.Persistent, copied.FormKey);
+            RemovePlacedByFormKey(bceCellOverride.Temporary, copied.FormKey);
 
             if (shouldBePersistent)
             {
@@ -527,22 +533,22 @@ public static class Program
             }
 
             movedCount++;
-            intentionallyModifiedFormKeys.Add(placed.FormKey);
-            trackedTransferredReferences?.Add(placed.FormKey);
+            intentionallyModifiedFormKeys.Add(copied.FormKey);
+            trackedTransferredReferences?.Add(copied.FormKey);
 
             if (settings.Debug)
             {
                 var destination = shouldBePersistent ? "Persistent" : "Temporary";
                 var action = removeFromVanillaCell ? "Moved" : "Copied";
-                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] {action} {placed.FormKey} -> {locationName} BCE {destination}.");
+                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] {action} {copied.FormKey} -> {locationName} BCE {destination}.");
             }
         }
 
-        if (vanillaCellOverride is not null)
+        if (removeFromVanillaCell && vanillaCellOverride != null)
         {
             intentionallyModifiedFormKeys.Add(vanillaCellOverride.FormKey);
         }
-
+        
         intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
         var verb = removeFromVanillaCell ? "moved" : "copied";
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2 ({locationName}): {verb} {movedCount} references to BCE cell.");
@@ -1290,7 +1296,10 @@ public static class Program
         var removedCount = removableKeys.Count;
         if (removedCount > 0)
         {
-            state.PatchMod.Remove(removableKeys);
+            foreach (var key in removableKeys)
+            {
+                state.PatchMod.Remove(key);
+            }
         }
 
         if (settings.Debug)
