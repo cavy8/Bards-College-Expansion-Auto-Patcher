@@ -261,10 +261,12 @@ public static class Program
         var movedBardsReferences = new HashSet<FormKey>();
         var copiedWinkingReferences = new HashSet<FormKey>();
 
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting Phase 2 transfer/sync pipeline.");
         MoveNewReferencesToBceCell(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys, movedBardsReferences);
         SyncMappedReferencesToBce(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys);
         CopyNewReferencesToBceWinkingCell(state, settings, executionContext, winkingRefMapping, intentionallyModifiedFormKeys, copiedWinkingReferences);
         SyncWinkingMappedReferencesToBce(state, settings, executionContext, winkingRefMapping, intentionallyModifiedFormKeys);
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting Phase 4 link remap.");
         SwapCellAndReferencePointers(
             state,
             settings,
@@ -273,9 +275,12 @@ public static class Program
             intentionallyModifiedFormKeys,
             movedBardsReferences,
             copiedWinkingReferences);
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting door replacement rewires.");
         RewireMovedReplacementDoorsForBardsCollege(state, settings, intentionallyModifiedFormKeys, bardsRefMapping, movedBardsReferences);
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting Phase 5 navdoor remap.");
         RemapBardsCollegeNavigationDoorLinks(state, settings, intentionallyModifiedFormKeys, movedBardsReferences);
 
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting cleanup and header sync.");
         CleanupUnintentionalPatchRecords(state, intentionallyModifiedFormKeys, settings);
         SyncPatchHeaderRecordCount(state, settings);
     }
@@ -291,10 +296,12 @@ public static class Program
         var movedBardsReferences = new HashSet<FormKey>();
         var copiedWinkingReferences = new HashSet<FormKey>();
 
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting Phase 2 transfer/sync pipeline.");
         MoveNewReferencesToBceCell(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys, movedBardsReferences);
         SyncMappedReferencesToBce(state, settings, executionContext, bardsRefMapping, intentionallyModifiedFormKeys);
         CopyNewReferencesToBceWinkingCell(state, settings, executionContext, winkingRefMapping, intentionallyModifiedFormKeys, copiedWinkingReferences);
         SyncWinkingMappedReferencesToBce(state, settings, executionContext, winkingRefMapping, intentionallyModifiedFormKeys);
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting Phase 4 link remap.");
         SwapCellAndReferencePointers(
             state,
             settings,
@@ -303,9 +310,12 @@ public static class Program
             intentionallyModifiedFormKeys,
             movedBardsReferences,
             copiedWinkingReferences);
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting door replacement rewires.");
         RewireMovedReplacementDoorsForBardsCollege(state, settings, intentionallyModifiedFormKeys, bardsRefMapping, movedBardsReferences);
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting Phase 5 navdoor remap.");
         RemapBardsCollegeNavigationDoorLinks(state, settings, intentionallyModifiedFormKeys, movedBardsReferences);
 
+        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Starting cleanup and header sync.");
         CleanupUnintentionalPatchRecords(state, intentionallyModifiedFormKeys, settings);
         SyncPatchHeaderRecordCount(state, settings);
     }
@@ -484,7 +494,12 @@ public static class Program
             return;
         }
 
-        var vanillaCellOverride = vanillaCellContext.GetOrAddAsOverride(state.PatchMod);
+        ICell? vanillaCellOverride = null;
+        if (removeFromVanillaCell)
+        {
+            vanillaCellOverride = vanillaCellContext.GetOrAddAsOverride(state.PatchMod);
+        }
+
         var bceCellOverride = bceCellContext.GetOrAddAsOverride(state.PatchMod);
 
         var movedCount = 0;
@@ -493,7 +508,7 @@ public static class Program
             var shouldBePersistent = activePersistentRefs.Contains(placed.FormKey) || !activeTemporaryRefs.Contains(placed.FormKey);
             var copied = ClonePlaced(placed);
 
-            if (removeFromVanillaCell)
+            if (removeFromVanillaCell && vanillaCellOverride is not null)
             {
                 RemovePlacedByFormKey(vanillaCellOverride.Persistent, placed.FormKey);
                 RemovePlacedByFormKey(vanillaCellOverride.Temporary, placed.FormKey);
@@ -523,7 +538,11 @@ public static class Program
             }
         }
 
-        intentionallyModifiedFormKeys.Add(vanillaCellOverride.FormKey);
+        if (vanillaCellOverride is not null)
+        {
+            intentionallyModifiedFormKeys.Add(vanillaCellOverride.FormKey);
+        }
+
         intentionallyModifiedFormKeys.Add(bceCellOverride.FormKey);
         var verb = removeFromVanillaCell ? "moved" : "copied";
         Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 2 ({locationName}): {verb} {movedCount} references to BCE cell.");
@@ -640,6 +659,27 @@ public static class Program
         sourceRecord = sourceContext.Record;
         previousRecord = previousContext.Record;
         return true;
+    }
+
+    private static Dictionary<FormKey, IMajorRecordGetter> BuildSourceMajorRecordIndex(
+        IPatcherState<ISkyrimMod, ISkyrimModGetter> state,
+        ModKey sourceModKey)
+    {
+        if (!state.LoadOrder.ContainsKey(sourceModKey))
+        {
+            return [];
+        }
+
+        var sourceModListing = state.LoadOrder[sourceModKey];
+        var sourceMod = sourceModListing.Mod;
+        if (sourceMod is null)
+        {
+            return [];
+        }
+
+        return sourceMod
+            .EnumerateMajorRecords()
+            .ToDictionary(record => record.FormKey, record => (IMajorRecordGetter)record);
     }
 
     private static bool RemovePlacedByFormKey(IList<IPlaced> list, FormKey formKey)
@@ -996,28 +1036,40 @@ public static class Program
         var qualifyingRecords = 0;
         var swappedRecords = 0;
         var swappedLinks = 0;
+        var scannedWinningRecords = 0;
+        const int ProgressReportInterval = 50_000;
+        var nextProgressReportAt = ProgressReportInterval;
 
         if (executionContext.IsSourceMode)
         {
             var sourceModKey = executionContext.SourceModKey!.Value;
+            var sourceRecordsByFormKey = BuildSourceMajorRecordIndex(state, sourceModKey);
+
+            Console.WriteLine(
+                $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: source mode scan starting ({sourceRecordsByFormKey.Count} source-plugin records indexed from {sourceModKey.FileName}).");
+
             foreach (var winningContext in state.LoadOrder.ListedOrder.WinningContextOverrides<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>(state.LinkCache))
             {
+                scannedWinningRecords++;
+                if (scannedWinningRecords >= nextProgressReportAt)
+                {
+                    Console.WriteLine(
+                        $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4 progress: scanned {scannedWinningRecords} winning records, evaluated {evaluatedRecords}, qualifying {qualifyingRecords}, remapped {swappedLinks} links.");
+                    nextProgressReportAt += ProgressReportInterval;
+                }
+
                 if (winningContext.ModKey == state.PatchMod.ModKey || executionContext.BlacklistedMods.Contains(winningContext.ModKey))
                 {
                     continue;
                 }
 
-                var sourceContext = winningContext.Record.FormKey
-                    .ToLink<IMajorRecordGetter>()
-                    .ResolveAllSimpleContexts<IMajorRecordGetter>(state.LinkCache)
-                    .FirstOrDefault(x => x.ModKey == sourceModKey);
-                if (sourceContext is null)
+                if (!sourceRecordsByFormKey.TryGetValue(winningContext.Record.FormKey, out var sourceRecord))
                 {
                     continue;
                 }
 
                 evaluatedRecords++;
-                if (sourceContext.Record is not IFormLinkContainerGetter sourceRecordWithLinks)
+                if (sourceRecord is not IFormLinkContainerGetter sourceRecordWithLinks)
                 {
                     continue;
                 }
@@ -1055,72 +1107,82 @@ public static class Program
         }
         else
         {
-        foreach (var context in state.LoadOrder.ListedOrder.WinningContextOverrides<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>(state.LinkCache))
-        {
-            evaluatedRecords++;
-            var sourceModKey = context.ModKey;
-            if (sourceModKey == state.PatchMod.ModKey
-                || sourceModKey == BceModKey
-                || VanillaMasterModKeys.Contains(sourceModKey)
-                || executionContext.BlacklistedMods.Contains(sourceModKey))
-            {
-                continue;
-            }
+            Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: global mode scan starting.");
 
-            if (context.Record is not IFormLinkContainerGetter recordWithLinks)
+            foreach (var context in state.LoadOrder.ListedOrder.WinningContextOverrides<ISkyrimMod, ISkyrimModGetter, IMajorRecord, IMajorRecordGetter>(state.LinkCache))
             {
-                continue;
-            }
+                scannedWinningRecords++;
+                if (scannedWinningRecords >= nextProgressReportAt)
+                {
+                    Console.WriteLine(
+                        $"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4 progress: scanned {scannedWinningRecords} winning records, evaluated {evaluatedRecords}, qualifying {qualifyingRecords}, remapped {swappedLinks} links.");
+                    nextProgressReportAt += ProgressReportInterval;
+                }
 
-            var matchedLinksInRecord = recordWithLinks
-                .EnumerateFormLinks()
-                .Count(link => swapMap.ContainsKey(link.FormKey));
-            if (matchedLinksInRecord == 0)
-            {
-                continue;
-            }
+                evaluatedRecords++;
+                var sourceModKey = context.ModKey;
+                if (sourceModKey == state.PatchMod.ModKey
+                    || sourceModKey == BceModKey
+                    || VanillaMasterModKeys.Contains(sourceModKey)
+                    || executionContext.BlacklistedMods.Contains(sourceModKey))
+                {
+                    continue;
+                }
 
-            qualifyingRecords++;
+                if (context.Record is not IFormLinkContainerGetter recordWithLinks)
+                {
+                    continue;
+                }
 
-            if (bceBardsCellOverride is not null
-                && TryGetPatchedPlacedByFormKey(bceBardsCellOverride, context.Record.FormKey, out var patchedPlaced)
-                && patchedPlaced is IFormLinkContainer patchedPlacedWithLinks)
-            {
-                patchedPlacedWithLinks.RemapLinks(swapMap);
+                var matchedLinksInRecord = recordWithLinks
+                    .EnumerateFormLinks()
+                    .Count(link => swapMap.ContainsKey(link.FormKey));
+                if (matchedLinksInRecord == 0)
+                {
+                    continue;
+                }
+
+                qualifyingRecords++;
+
+                if (bceBardsCellOverride is not null
+                    && TryGetPatchedPlacedByFormKey(bceBardsCellOverride, context.Record.FormKey, out var patchedPlaced)
+                    && patchedPlaced is IFormLinkContainer patchedPlacedWithLinks)
+                {
+                    patchedPlacedWithLinks.RemapLinks(swapMap);
+                    swappedRecords++;
+                    swappedLinks += matchedLinksInRecord;
+                    intentionallyModifiedFormKeys.Add(bceBardsCellOverride.FormKey);
+                    intentionallyModifiedFormKeys.Add(patchedPlaced.FormKey);
+
+                    if (settings.Debug)
+                    {
+                        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: merged remap into BCE cell record {patchedPlaced.FormKey}.");
+                    }
+
+                    continue;
+                }
+
+                var overrideRecord = context.GetOrAddAsOverride(state.PatchMod);
+                if (overrideRecord is not IFormLinkContainer mutableRecord)
+                {
+                    if (settings.Debug)
+                    {
+                        Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: skipped {context.Record.FormKey} (not mutable FormLink container).");
+                    }
+
+                    continue;
+                }
+
+                mutableRecord.RemapLinks(swapMap);
                 swappedRecords++;
                 swappedLinks += matchedLinksInRecord;
-                intentionallyModifiedFormKeys.Add(bceBardsCellOverride.FormKey);
-                intentionallyModifiedFormKeys.Add(patchedPlaced.FormKey);
+                intentionallyModifiedFormKeys.Add(overrideRecord.FormKey);
 
                 if (settings.Debug)
                 {
-                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: merged remap into BCE cell record {patchedPlaced.FormKey}.");
+                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: remapped {matchedLinksInRecord} links in {overrideRecord.FormKey} from {sourceModKey.FileName}.");
                 }
-
-                continue;
             }
-
-            var overrideRecord = context.GetOrAddAsOverride(state.PatchMod);
-            if (overrideRecord is not IFormLinkContainer mutableRecord)
-            {
-                if (settings.Debug)
-                {
-                    Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: skipped {context.Record.FormKey} (not mutable FormLink container).");
-                }
-
-                continue;
-            }
-
-            mutableRecord.RemapLinks(swapMap);
-            swappedRecords++;
-            swappedLinks += matchedLinksInRecord;
-            intentionallyModifiedFormKeys.Add(overrideRecord.FormKey);
-
-            if (settings.Debug)
-            {
-                Console.WriteLine($"[{nameof(BardsCollegeExpansionAutoPatcher)}] Phase 4: remapped {matchedLinksInRecord} links in {overrideRecord.FormKey} from {sourceModKey.FileName}.");
-            }
-        }
         }
 
         swappedLinks += RemapLinksInTransferredPlacedRecords(
