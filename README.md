@@ -15,3 +15,10 @@ This is a Synthesis patcher for the Bards College Expansion mod for Skyrim Speci
 - Phase 3: Sync changes to matching references and cell records
 - Phase 4: Swap cell/reference pointers only within cloned records and/or bce cell
 - Phase 5: skip
+
+## To Do
+- Add support for custom races
+- Investigate support for non-WS tavern overhauls
+
+## Credits
+- SREX Patcher (reference): https://github.com/TheOneAndOnlyJ3w3ls/SR-Exterior-Cities-Patcher/tree/main
